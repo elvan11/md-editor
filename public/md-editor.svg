@@ -38,8 +38,8 @@
   <!-- Markdown header symbol '#' built with rounded strokes for legibility at small sizes -->
   <g stroke="var(--symbol)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" fill="none">
     <!-- horizontal bars -->
-    <path d="M16 36h32M16 46h32"/>
+    <path d="M16 28h32M16 38h32"/>
     <!-- vertical bars -->
-    <path d="M26 28v28M38 28v28"/>
+    <path d="M26 20v28M38 20v28"/>
   </g>
 </svg>
