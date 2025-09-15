@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/md-editor/md-editor.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      // Initialize dark mode based on preference (auto/light/dark) and keep it in sync
+      (function () {
+        try {
+          var STORAGE_KEY = 'theme'
+          var mql = window.matchMedia('(prefers-color-scheme: dark)')
+
+          function currentPreference() {
+            var pref = localStorage.getItem(STORAGE_KEY)
+            return pref === 'light' || pref === 'dark' ? pref : 'auto'
+          }
+
+          function applyTheme() {
+            var pref = currentPreference()
+            if (pref === 'dark') {
+              document.documentElement.classList.add('dark')
+            } else if (pref === 'light') {
+              document.documentElement.classList.remove('dark')
+            } else {
+              document.documentElement.classList.toggle('dark', !!mql.matches)
+            }
+          }
+
+          applyTheme()
+
+          var onChange = function () {
+            // Re-apply using the latest preference. If not auto, this is a no-op.
+            applyTheme()
+          }
+          if (typeof mql.addEventListener === 'function') {
+            mql.addEventListener('change', onChange)
+          } else if (typeof mql.addListener === 'function') {
+            // Safari fallback
+            mql.addListener(onChange)
+          }
+
+          // React to changes in localStorage from the app or other tabs
+          window.addEventListener('storage', function (e) {
+            if (e.key === STORAGE_KEY) applyTheme()
+          })
+
+          // Expose a tiny setter for convenience (optional)
+          window.__setTheme = function (pref) {
+            try {
+              if (pref === 'light' || pref === 'dark' || pref === 'auto') {
+                localStorage.setItem(STORAGE_KEY, pref)
+              } else {
+                localStorage.removeItem(STORAGE_KEY)
+              }
+            } catch (_) {}
+            applyTheme()
+          }
+        } catch (e) {
+          // No-op if matchMedia unsupported
+        }
+      })()
+    </script>
+    <title>MD Editor</title>
+    <script type="module" crossorigin src="/md-editor/assets/index-6B9fO5wQ.js"></script>
+    <link rel="stylesheet" crossorigin href="/md-editor/assets/index-BTkq_XaC.css">
+  </head>
+  <body class="min-h-screen">
+    <div id="app"></div>
+  </body>
+</html>
