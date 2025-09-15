@@ -4,6 +4,7 @@ import { fileURLToPath, URL } from 'node:url'
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: '/md-editor/',
   plugins: [vue()],
   resolve: {
     alias: {
