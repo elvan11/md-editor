@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import Button from '@/components/ui/button/Button.vue'
@@ -177,44 +177,115 @@ async function copyFormatted() {
   }
 }
 
+// Theme switching (auto | light | dark)
+type ThemeMode = 'auto' | 'light' | 'dark'
+const THEME_STORAGE_KEY = 'theme'
+const themeMode = ref<ThemeMode>(((localStorage.getItem(THEME_STORAGE_KEY) as ThemeMode) || 'auto'))
+
+let mql: MediaQueryList | null = null
+let mqlHandler: ((this: MediaQueryList, ev: MediaQueryListEvent) => any) | null = null
+
+function applyTheme(mode: ThemeMode) {
+  // Also call the global helper from index.html if present to keep in sync
+  if (typeof (window as any).__setTheme === 'function') {
+    ;(window as any).__setTheme(mode)
+    return
+  }
+  // Fallback: directly toggle class
+  if (!mql) mql = window.matchMedia('(prefers-color-scheme: dark)')
+  if (mode === 'dark') document.documentElement.classList.add('dark')
+  else if (mode === 'light') document.documentElement.classList.remove('dark')
+  else document.documentElement.classList.toggle('dark', !!mql.matches)
+}
+
+function setTheme(mode: ThemeMode) {
+  themeMode.value = mode
+}
+
+watch(themeMode, (mode) => {
+  try {
+    if (mode === 'auto') localStorage.removeItem(THEME_STORAGE_KEY)
+    else localStorage.setItem(THEME_STORAGE_KEY, mode)
+  } catch (_) {}
+  applyTheme(mode)
+})
+
 onMounted(() => {
-  // Prefer light mode desktop-first; keep class hooks available for dark if desired
-  document.documentElement.classList.remove('dark')
+  mql = window.matchMedia('(prefers-color-scheme: dark)')
+  mqlHandler = () => {
+    if (themeMode.value === 'auto') applyTheme('auto')
+  }
+  if (typeof mql.addEventListener === 'function') mql.addEventListener('change', mqlHandler)
+  else if (typeof (mql as any).addListener === 'function') (mql as any).addListener(mqlHandler)
+  // Ensure applied on mount
+  applyTheme(themeMode.value)
+})
+
+onBeforeUnmount(() => {
+  if (mql && mqlHandler) {
+    if (typeof mql.removeEventListener === 'function') mql.removeEventListener('change', mqlHandler)
+    else if (typeof (mql as any).removeListener === 'function') (mql as any).removeListener(mqlHandler)
+  }
 })
 </script>
 
 <template>
-  <div class="min-h-screen w-full bg-background">
+  <div class="min-h-screen w-full bg-background bg-app-gradient">
     <header class="border-b bg-card/50 backdrop-blur supports-[backdrop-filter]:bg-card/60">
       <div class="container flex h-14 items-center justify-between">
         <div class="flex items-center gap-2">
-          <div class="h-6 w-6 rounded bg-primary/90" aria-hidden="true" />
+          <img src="/md-editor.svg" alt="MD Editor" class="h-6 w-6" aria-hidden="true" />
           <span class="font-semibold tracking-tight">MD Editor</span>
         </div>
-        <div class="text-xs text-muted-foreground">Vue 3 • Tailwind • shadcn</div>
+        <div class="flex items-center gap-2">
+          <span class="hidden text-xs text-muted-foreground sm:inline">Theme</span>
+          <div class="inline-flex rounded-md border bg-background p-0.5">
+            <button
+              type="button"
+              class="px-2.5 py-1 text-xs rounded-md transition-colors"
+              :class="themeMode === 'auto' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+              @click="setTheme('auto')"
+              :aria-pressed="themeMode === 'auto'"
+            >Auto</button>
+            <button
+              type="button"
+              class="px-2.5 py-1 text-xs rounded-md transition-colors"
+              :class="themeMode === 'light' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+              @click="setTheme('light')"
+              :aria-pressed="themeMode === 'light'"
+            >Light</button>
+            <button
+              type="button"
+              class="px-2.5 py-1 text-xs rounded-md transition-colors"
+              :class="themeMode === 'dark' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+              @click="setTheme('dark')"
+              :aria-pressed="themeMode === 'dark'"
+            >Dark</button>
+          </div>
+        </div>
       </div>
     </header>
 
     <main class="container py-6">
       <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <!-- Left: Markdown input -->
-        <section class="flex flex-col rounded-lg border bg-card shadow-sm">
-          <div class="flex items-center justify-between border-b p-3 md:p-4">
-            <h2 class="text-sm font-medium tracking-tight">Markdown</h2>
-            <span class="text-xs text-muted-foreground">Editable</span>
-          </div>
-          <div class="p-3 md:p-4">
-            <textarea
-              v-model="mdInput"
-              class="min-h-[65vh] w-full resize-vertical rounded-md border bg-background p-3 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              spellcheck="false"
-              placeholder="Type your Markdown here..."
-            />
-          </div>
-        </section>
+          <!-- Left: Markdown input -->
+          <section class="flex flex-col rounded-lg border bg-card shadow-sm">
+            <div class="flex items-center justify-between border-b p-3 md:p-4">
+              <h2 class="text-sm font-medium tracking-tight">Markdown</h2>
+              <span class="text-xs text-muted-foreground">Editable</span>
+            </div>
+            <div class="p-3 md:p-4">
+              <textarea
+                v-model="mdInput"
+                class="min-h-[65vh] w-full resize-vertical rounded-md border bg-background p-3 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                spellcheck="false"
+                placeholder="Type your Markdown here..."
+              />
+            </div>
+          </section>
 
-        <!-- Right: Preview -->
-        <section class="flex flex-col rounded-lg border bg-card shadow-sm">
+          <!-- Right: Preview -->
+          <section class="flex flex-col rounded-lg border bg-card shadow-sm">
           <div class="flex items-center justify-between gap-2 border-b p-3 md:p-4">
             <h2 class="text-sm font-medium tracking-tight">Preview</h2>
             <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>

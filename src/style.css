@@ -73,6 +73,21 @@
   }
 }
 
+@layer utilities {
+  /* Global app background gradient for both modes */
+  .bg-app-gradient {
+    background-color: hsl(var(--background)) !important;
+    background-image: 
+      radial-gradient(circle at 20% 30%, hsl(var(--primary) / 0.18), transparent 45%),
+      radial-gradient(circle at 80% 70%, hsl(var(--accent) / 0.14), transparent 45%),
+      linear-gradient(135deg, hsl(var(--muted) / 0.12) 0%, transparent 50%, hsl(var(--muted) / 0.12) 100%) !important;
+    background-size: 800px 800px, 600px 600px, 100% 100%;
+    background-position: top left, bottom right, center;
+    background-repeat: no-repeat;
+    min-height: 100vh;
+  }
+}
+
 /* Prose styles for Markdown preview */
 .prose :where(pre):not(:where([class~="not-prose"] *)) {
   @apply bg-muted p-4 rounded-md overflow-auto;
