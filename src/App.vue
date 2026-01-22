@@ -293,7 +293,7 @@ onBeforeUnmount(() => {
           <div class="p-3 md:p-4">
             <div
               ref="previewRef"
-              class="prose max-w-none leading-relaxed outline-none"
+              class="print-content prose max-w-none leading-relaxed outline-none"
               v-html="renderedHtml"
               :contenteditable="true"
               tabindex="0"
