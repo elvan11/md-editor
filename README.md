@@ -1,7 +1,38 @@
-# Vue 3 + TypeScript + Vite
+# MD Editor
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+A fast, split-view Markdown editor with live preview, rich paste handling, and print-friendly output.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+## Features
+- Live 50/50 editor + preview layout
+- Markdown preview rendered with sanitized HTML
+- Paste rich text into the preview to convert to Markdown
+- One-click “Copy formatted” for Google Docs and other editors
+- Print view shows only the rendered Markdown content
+- Light / dark / auto theme toggle
 
-<!-- Deployed via GitHub Actions -->
+## Usage
+1. Type Markdown in the left editor.
+2. Preview updates instantly on the right.
+3. Paste rich text into the preview area to convert it into Markdown.
+4. Click “Copy formatted” to copy rich HTML + plain text.
+5. Print from the browser; only the formatted content is included.
+
+## Development
+```bash
+npm install
+npm run dev
+```
+
+## Build
+```bash
+npm run build
+```
+
+## Tech Stack
+- Vue 3 + TypeScript
+- Vite
+- Tailwind CSS
+- Markdown-It + DOMPurify
+
+## License
+MIT
