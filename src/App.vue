@@ -4,8 +4,29 @@ import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import Button from '@/components/ui/button/Button.vue'
 import TurndownService from 'turndown'
+import * as pdfjs from 'pdfjs-dist'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 // @ts-ignore - types may not be bundled
 import { gfm } from 'turndown-plugin-gfm'
+
+const MAX_PDF_BYTES = 10 * 1024 * 1024
+const MAX_PDF_PAGES = 100
+
+type PdfTextSegment = {
+  text: string
+  x: number
+  width: number
+  fontSize: number
+}
+
+type ExtractedLine = {
+  text: string
+  hasTabs: boolean
+  fontSize: number
+  breakAfter: boolean
+}
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
 
 const md = new MarkdownIt({
   html: false,
@@ -41,6 +62,11 @@ const renderedHtml = computed(() => {
 })
 
 const previewRef = ref<HTMLDivElement | null>(null)
+const isImportingPdf = ref(false)
+const importStatus = ref('')
+const importError = ref('')
+const dragDepth = ref(0)
+const isDraggingPdf = computed(() => dragDepth.value > 0)
 
 const td = new TurndownService({
   headingStyle: 'atx',
@@ -139,6 +165,291 @@ function onPastePreview(e: ClipboardEvent) {
   }
 }
 
+function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || /\.pdf$/i.test(file.name)
+}
+
+function pickPdfFile(fileList: FileList | null): File | null {
+  if (!fileList) return null
+  for (const file of Array.from(fileList)) {
+    if (isPdfFile(file)) return file
+  }
+  return null
+}
+
+function getMedian(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) / 2
+  }
+  return sorted[middle]
+}
+
+function quantizeY(value: number): number {
+  return Math.round(value / 2) * 2
+}
+
+function extractLinesFromPdfTextContent(textContent: any): ExtractedLine[] {
+  const rowMap = new Map<number, PdfTextSegment[]>()
+
+  for (const rawItem of textContent.items || []) {
+    const text = String((rawItem as any).str || '').replace(/\s+/g, ' ').trim()
+    if (!text) continue
+
+    const transform = Array.isArray((rawItem as any).transform) ? (rawItem as any).transform : []
+    const x = Number(transform[4] || 0)
+    const y = Number(transform[5] || 0)
+    const width = Number((rawItem as any).width || Math.max(4, text.length * 4))
+    const fontSize = Math.abs(Number(transform[0] || transform[3] || (rawItem as any).height || 12))
+
+    const yKey = quantizeY(y)
+    const segments = rowMap.get(yKey) || []
+    segments.push({ text, x, width, fontSize })
+    rowMap.set(yKey, segments)
+  }
+
+  const rows = Array.from(rowMap.entries())
+    .map(([y, segments]) => ({ y, segments: segments.sort((a, b) => a.x - b.x) }))
+    .sort((a, b) => b.y - a.y)
+
+  const lines: ExtractedLine[] = []
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]
+    let text = ''
+    let hasTabs = false
+    let previousEnd = 0
+    let previousCharWidth = 5
+
+    row.segments.forEach((segment, segmentIndex) => {
+      if (segmentIndex > 0) {
+        const gap = segment.x - previousEnd
+        const tabThreshold = Math.max(24, previousCharWidth * 6)
+        const spaceThreshold = Math.max(6, previousCharWidth * 1.75)
+        if (gap > tabThreshold) {
+          text += '\t'
+          hasTabs = true
+        } else if (gap > spaceThreshold) {
+          text += ' '
+        }
+      }
+      text += segment.text
+      previousEnd = segment.x + segment.width
+      previousCharWidth = segment.width / Math.max(segment.text.length, 1)
+    })
+
+    const normalized = text.replace(/[ \t]+$/g, '').replace(/[ ]{2,}/g, ' ')
+    if (!normalized) continue
+
+    const avgFontSize = row.segments.reduce((sum, segment) => sum + segment.fontSize, 0) / row.segments.length
+    const nextRow = rows[i + 1]
+    const rowGap = nextRow ? Math.abs(row.y - nextRow.y) : 0
+    const breakAfter = rowGap > avgFontSize * 1.7
+
+    lines.push({
+      text: normalized,
+      hasTabs,
+      fontSize: avgFontSize,
+      breakAfter,
+    })
+  }
+
+  return lines
+}
+
+function looksLikeHeading(text: string, fontSize: number, bodyFontSize: number): boolean {
+  const plain = text.trim()
+  if (!plain) return false
+  if (plain.length > 90) return false
+  if (/^[-*]\s+/.test(plain)) return false
+  if (/^\d+[\.\)]\s+/.test(plain)) return false
+  if (plain.includes('\t')) return false
+
+  const ratio = fontSize / Math.max(bodyFontSize, 1)
+  if (ratio < 1.28) return false
+
+  const wordCount = plain.split(/\s+/).length
+  return wordCount <= 14
+}
+
+function headingLevel(fontSize: number, bodyFontSize: number): number {
+  const ratio = fontSize / Math.max(bodyFontSize, 1)
+  if (ratio >= 1.95) return 1
+  if (ratio >= 1.65) return 2
+  return 3
+}
+
+function normalizeListPrefix(text: string): string {
+  return text
+    .replace(/^[•◦▪▸►‣]\s*/u, '- ')
+    .replace(/^\((\d+)\)\s+/, '$1. ')
+}
+
+function splitTabbedColumns(text: string): string[] {
+  return text.split('\t').map((part) => part.trim())
+}
+
+function fallbackTabbedBlock(block: ExtractedLine[]): string[] {
+  return block.map((line) => normalizeListPrefix(line.text.replace(/\t+/g, ' ').replace(/[ ]{2,}/g, ' ').trim()))
+}
+
+function tabbedBlockToMarkdownTable(block: ExtractedLine[]): string[] {
+  const rows = block.map((line) => splitTabbedColumns(line.text))
+  const minCols = Math.min(...rows.map((row) => row.length))
+  const maxCols = Math.max(...rows.map((row) => row.length))
+
+  if (rows.length < 2 || maxCols < 2 || maxCols - minCols > 1) {
+    return fallbackTabbedBlock(block)
+  }
+
+  const colCount = maxCols
+  const paddedRows = rows.map((row) => {
+    const normalized = row.map((cell) => cell.replace(/\|/g, '\\|').trim())
+    while (normalized.length < colCount) normalized.push('')
+    return normalized.slice(0, colCount)
+  })
+
+  const header = `| ${paddedRows[0].join(' | ')} |`
+  const divider = `| ${Array.from({ length: colCount }, () => '---').join(' | ')} |`
+  const body = paddedRows.slice(1).map((row) => `| ${row.join(' | ')} |`)
+
+  return [header, divider, ...body]
+}
+
+function linesToMarkdown(lines: ExtractedLine[], bodyFontSize: number): string {
+  const out: string[] = []
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (line.hasTabs) {
+      const block: ExtractedLine[] = [line]
+      while (i + 1 < lines.length && lines[i + 1].hasTabs) {
+        block.push(lines[i + 1])
+        i += 1
+      }
+      out.push(...tabbedBlockToMarkdownTable(block))
+      out.push('')
+      continue
+    }
+
+    const normalized = normalizeListPrefix(line.text.trim())
+    if (!normalized) {
+      out.push('')
+      continue
+    }
+
+    if (looksLikeHeading(normalized, line.fontSize, bodyFontSize)) {
+      const level = headingLevel(line.fontSize, bodyFontSize)
+      out.push(`${'#'.repeat(level)} ${normalized}`)
+    } else {
+      out.push(normalized)
+    }
+
+    if (line.breakAfter) {
+      out.push('')
+    }
+  }
+
+  return out
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+}
+
+async function pdfToMarkdown(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  const pdf = await pdfjs.getDocument({ data: bytes, useSystemFonts: true }).promise
+
+  if (pdf.numPages > MAX_PDF_PAGES) {
+    throw new Error(`This PDF has ${pdf.numPages} pages. Limit is ${MAX_PDF_PAGES}.`)
+  }
+
+  const pages: ExtractedLine[][] = []
+  for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
+    importStatus.value = `Reading page ${pageNo}/${pdf.numPages}...`
+    const page = await pdf.getPage(pageNo)
+    const textContent = await page.getTextContent({
+      normalizeWhitespace: true,
+      disableCombineTextItems: false,
+    })
+    pages.push(extractLinesFromPdfTextContent(textContent))
+  }
+
+  const allLines = pages.flat()
+  if (allLines.length === 0) {
+    throw new Error('No selectable text was found. This PDF may be scanned; OCR is not enabled yet.')
+  }
+
+  const bodyFontCandidates = allLines
+    .filter((line) => line.text.length >= 20 && !line.hasTabs)
+    .map((line) => line.fontSize)
+  const fallbackFontCandidates = allLines.map((line) => line.fontSize)
+  const bodyFontSize = getMedian(bodyFontCandidates.length > 0 ? bodyFontCandidates : fallbackFontCandidates) || 12
+
+  const perPageMarkdown = pages.map((pageLines) => linesToMarkdown(pageLines, bodyFontSize)).filter(Boolean)
+  return perPageMarkdown.join('\n\n---\n\n').trim()
+}
+
+async function importPdf(file: File) {
+  importError.value = ''
+  importStatus.value = ''
+
+  if (!isPdfFile(file)) {
+    importError.value = 'Only PDF files are supported.'
+    return
+  }
+
+  if (file.size > MAX_PDF_BYTES) {
+    importError.value = `File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Limit is 10 MB.`
+    return
+  }
+
+  isImportingPdf.value = true
+  try {
+    importStatus.value = 'Loading PDF parser...'
+    const markdown = await pdfToMarkdown(file)
+    mdInput.value = markdown
+    importStatus.value = `Imported ${file.name}`
+  } catch (err) {
+    console.error('PDF import failed:', err)
+    importError.value = err instanceof Error ? err.message : 'PDF import failed.'
+    importStatus.value = ''
+  } finally {
+    isImportingPdf.value = false
+  }
+}
+
+function onDragEnterPdf(e: DragEvent) {
+  if (!e.dataTransfer) return
+  if (!Array.from(e.dataTransfer.types).includes('Files')) return
+  dragDepth.value += 1
+}
+
+function onDragOverPdf(e: DragEvent) {
+  if (!e.dataTransfer) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeavePdf() {
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+}
+
+async function onDropPdf(e: DragEvent) {
+  e.preventDefault()
+  dragDepth.value = 0
+
+  const file = pickPdfFile(e.dataTransfer?.files || null)
+  if (!file) {
+    importError.value = 'Drop a PDF file to import.'
+    return
+  }
+
+  await importPdf(file)
+}
+
 function onBeforeInput(e: InputEvent) {
   const allowed = ['insertFromPaste', 'insertFromDrop']
   // Block typing/formatting in the preview; allow paste/drop only
@@ -230,7 +541,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="min-h-screen w-full bg-background bg-app-gradient">
+  <div
+    class="relative min-h-screen w-full bg-background bg-app-gradient"
+    @dragenter="onDragEnterPdf"
+    @dragover.prevent="onDragOverPdf"
+    @dragleave="onDragLeavePdf"
+    @drop="onDropPdf"
+  >
     <header class="border-b bg-card/50 backdrop-blur supports-[backdrop-filter]:bg-card/60">
       <div class="container flex h-14 items-center justify-between">
         <div class="flex items-center gap-2">
@@ -267,6 +584,10 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="container py-6">
+      <div v-if="importStatus || importError" class="mb-4 rounded-md border bg-card p-3 text-sm">
+        <p v-if="importStatus" class="text-muted-foreground">{{ importStatus }}</p>
+        <p v-if="importError" class="text-destructive">{{ importError }}</p>
+      </div>
       <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
           <!-- Left: Markdown input -->
           <section class="flex flex-col rounded-lg border bg-card shadow-sm">
@@ -288,7 +609,10 @@ onBeforeUnmount(() => {
           <section class="flex flex-col rounded-lg border bg-card shadow-sm">
           <div class="flex items-center justify-between gap-2 border-b p-3 md:p-4">
             <h2 class="text-sm font-medium tracking-tight">Preview</h2>
-            <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>
+            <div class="flex items-center gap-2">
+              <span class="hidden text-xs text-muted-foreground sm:inline">Drop PDF anywhere to import</span>
+              <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>
+            </div>
           </div>
           <div class="p-3 md:p-4">
             <div
@@ -301,11 +625,21 @@ onBeforeUnmount(() => {
               aria-label="Markdown preview. Paste rich text here to convert to Markdown."
               @paste.prevent="onPastePreview"
               @beforeinput="onBeforeInput"
+              @drop.prevent
             />
           </div>
         </section>
       </div>
     </main>
+    <div
+      v-if="isDraggingPdf || isImportingPdf"
+      class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-sm"
+    >
+      <div class="rounded-lg border bg-card px-5 py-4 text-center shadow-lg">
+        <p class="text-sm font-medium">{{ isImportingPdf ? 'Importing PDF...' : 'Drop PDF to import' }}</p>
+        <p class="mt-1 text-xs text-muted-foreground">Up to 10 MB and 100 pages</p>
+      </div>
+    </div>
   </div>
   <!-- eslint-disable-next-line vue/no-v-html -->
 </template>
