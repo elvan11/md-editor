@@ -645,10 +645,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.prose :deep(h1) { @apply scroll-m-20 text-4xl font-bold tracking-tight; }
-.prose :deep(h2) { @apply scroll-m-20 border-b pb-2 text-2xl font-semibold tracking-tight first:mt-0; }
-.prose :deep(h3) { @apply scroll-m-20 text-xl font-semibold tracking-tight; }
+.prose :deep(h1) { @apply scroll-m-20 text-3xl font-bold tracking-tight; }
+.prose :deep(h2) { @apply scroll-m-20 border-b pb-2 text-xl font-semibold tracking-tight first:mt-0; }
+.prose :deep(h3) { @apply scroll-m-20 text-lg font-semibold tracking-tight; }
+.prose :deep(h1) { margin-top: 1.2em; }
+.prose :deep(h2) { margin-top: 1.1em; }
+.prose :deep(h3) { margin-top: 1em; }
+.prose :deep(h4) { margin-top: 0.9em; }
+.prose :deep(h5) { margin-top: 0.8em; }
+.prose :deep(h6) { margin-top: 0.7em; }
+.prose :deep(:where(h1, h2, h3, h4, h5, h6):first-child) { margin-top: 0; }
 .prose :deep(p) { @apply leading-7; }
+.prose :deep(p + p) { @apply mt-4; }
+.prose :deep(hr) { @apply my-8 border-border; }
 .prose :deep(ul) { @apply my-4 ml-6 list-disc; }
 .prose :deep(ol) { @apply my-4 ml-6 list-decimal; }
 .prose :deep(blockquote) { @apply mt-6 border-l-2 pl-6 italic text-muted-foreground; }
