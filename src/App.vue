@@ -488,6 +488,14 @@ async function copyFormatted() {
   }
 }
 
+async function copyMarkdown() {
+  await navigator.clipboard.writeText(mdInput.value)
+}
+
+function printPreview() {
+  window.print()
+}
+
 // Theme switching (auto | light | dark)
 type ThemeMode = 'auto' | 'light' | 'dark'
 const THEME_STORAGE_KEY = 'theme'
@@ -593,7 +601,10 @@ onBeforeUnmount(() => {
           <section class="flex flex-col rounded-lg border bg-card shadow-sm">
             <div class="flex items-center justify-between border-b p-3 md:p-4">
               <h2 class="text-sm font-medium tracking-tight">Markdown</h2>
-              <span class="text-xs text-muted-foreground">Editable</span>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-muted-foreground">Editable</span>
+                <Button size="sm" variant="secondary" @click="copyMarkdown">Copy Markdown</Button>
+              </div>
             </div>
             <div class="p-3 md:p-4">
               <textarea
@@ -611,6 +622,7 @@ onBeforeUnmount(() => {
             <h2 class="text-sm font-medium tracking-tight">Preview</h2>
             <div class="flex items-center gap-2">
               <span class="hidden text-xs text-muted-foreground sm:inline">Drop PDF anywhere to import</span>
+              <Button size="sm" variant="secondary" @click="printPreview">Print</Button>
               <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>
             </div>
           </div>
