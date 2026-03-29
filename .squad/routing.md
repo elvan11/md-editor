@@ -6,12 +6,14 @@ How to decide who handles what.
 
 | Work Type | Route To | Examples |
 |-----------|----------|----------|
-| {domain 1} | {Name} | {example tasks} |
-| {domain 2} | {Name} | {example tasks} |
-| {domain 3} | {Name} | {example tasks} |
-| Code review | {Name} | Review PRs, check quality, suggest improvements |
-| Testing | {Name} | Write tests, find edge cases, verify fixes |
-| Scope & priorities | {Name} | What to build next, trade-offs, decisions |
+| Vue components, UI, Tailwind, UX | Dallas | New UI features, styling fixes, layout, responsive design |
+| Markdown processing, LaTeX engine | Fenster | markdown-it config, LaTeX converter, template system, DOMPurify |
+| Supabase / data persistence | Fenster | Auth, database, storage, API integration |
+| App architecture, decisions | Keaton | Structural changes, tech choices, cross-cutting concerns |
+| Code review | Keaton | Review PRs, check quality, suggest improvements |
+| Testing | Hockney | Write tests, find edge cases, verify fixes, regression checks |
+| Print / export | Fenster + Dallas | Fenster owns logic, Dallas owns print CSS/layout |
+| Scope & priorities | Keaton | What to build next, trade-offs, decisions |
 | Session logging | Scribe | Automatic — never needs routing |
 
 ## Issue Routing

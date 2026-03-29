@@ -3,11 +3,15 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import Button from '@/components/ui/button/Button.vue'
+import LatexTemplateDialog from '@/components/LatexTemplateDialog.vue'
+import LatexPreviewDialog from '@/components/LatexPreviewDialog.vue'
 import TurndownService from 'turndown'
 import * as pdfjs from 'pdfjs-dist'
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 // @ts-ignore - types may not be bundled
 import { gfm } from 'turndown-plugin-gfm'
+import { DEFAULT_LATEX_TEMPLATES, getDefaultTemplate, formatLatexTemplate, type LatexTemplate } from '@/lib/latex-templates'
+import { markdownToLatex } from '@/lib/markdown-to-latex'
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024
 const MAX_PDF_PAGES = 100
@@ -33,6 +37,26 @@ const md = new MarkdownIt({
   linkify: true,
   typographer: true,
   breaks: true,
+})
+
+// LaTeX Templates State
+const templates = ref<LatexTemplate[]>([
+  ...DEFAULT_LATEX_TEMPLATES,
+])
+const selectedLatexTemplate = ref<LatexTemplate>(getDefaultTemplate())
+const showTemplateDialog = ref(false)
+const showLatexPreview = ref(false)
+const generatedLatex = ref('')
+const latexPreviewHtmlDoc = ref('')
+
+type RenderMode = 'html' | 'latex'
+const RENDER_MODE_KEY = 'renderMode'
+const renderMode = ref<RenderMode>(
+  (localStorage.getItem(RENDER_MODE_KEY) as RenderMode) === 'latex' ? 'latex' : 'html'
+)
+
+watch(renderMode, (mode) => {
+  try { localStorage.setItem(RENDER_MODE_KEY, mode) } catch (_) {}
 })
 
 const mdInput = ref<string>(`# Markdown Editor
@@ -488,12 +512,293 @@ async function copyFormatted() {
   }
 }
 
+// Build template-specific CSS for the LaTeX-styled render
+function getLatexTemplateCss(template: LatexTemplate): string {
+  const base = `
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif;
+      font-size: 11pt;
+      line-height: 1.55;
+      color: #000;
+      background: #fff;
+    }
+    .page-wrap {
+      max-width: 170mm;
+      margin: 0 auto;
+      padding: 20mm 0;
+    }
+    .doc-title {
+      font-size: 1.9em;
+      font-weight: bold;
+      text-align: center;
+      margin-bottom: 0.15em;
+      margin-top: 0;
+    }
+    .doc-date {
+      text-align: center;
+      color: #555;
+      font-size: 0.85em;
+      margin-bottom: 2.5em;
+    }
+    h1 { font-size: 1.5em; font-weight: bold; margin-top: 2em; margin-bottom: 0.4em; }
+    h2 { font-size: 1.25em; font-weight: bold; margin-top: 1.5em; margin-bottom: 0.35em; }
+    h3 { font-size: 1.1em; font-weight: bold; margin-top: 1.2em; margin-bottom: 0.3em; }
+    h4, h5, h6 { font-size: 1em; font-weight: bold; margin-top: 1em; margin-bottom: 0.25em; }
+    p { margin: 0.6em 0; }
+    ul, ol { margin: 0.6em 0 0.6em 2.5em; }
+    li { margin: 0.2em 0; line-height: 1.5; }
+    code {
+      font-family: "Courier New", "Lucida Console", monospace;
+      font-size: 0.82em;
+      background: #f4f4f4;
+      padding: 0.1em 0.3em;
+      border-radius: 2px;
+    }
+    pre {
+      font-family: "Courier New", "Lucida Console", monospace;
+      font-size: 0.82em;
+      background: #f4f4f4;
+      border: 1px solid #ddd;
+      border-left: 3px solid #999;
+      padding: 0.8em 1em;
+      border-radius: 2px;
+      overflow-x: auto;
+      margin: 1em 0;
+    }
+    pre code { background: none; padding: 0; font-size: 1em; }
+    blockquote {
+      margin: 0.8em 0;
+      padding: 0.1em 0 0.1em 1em;
+      border-left: 3px solid #aaa;
+      font-style: italic;
+      color: #444;
+    }
+    hr { border: none; border-top: 1px solid #bbb; margin: 1.5em 0; }
+    a { color: #000066; }
+    table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+    th { border-bottom: 2px solid #000; padding: 0.3em 0.6em; text-align: left; font-weight: bold; }
+    td { border-bottom: 1px solid #ccc; padding: 0.3em 0.6em; }
+    strong { font-weight: bold; }
+    em { font-style: italic; }
+    del { text-decoration: line-through; color: #999; }
+    img { max-width: 100%; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      pre { page-break-inside: avoid; }
+      h1, h2, h3, h4 { page-break-after: avoid; }
+    }
+  `
+  const overrides: Record<string, string> = {
+    article: `
+      h2 { border-bottom: 0.5pt solid #ccc; padding-bottom: 0.15em; }
+      @media print { @page { size: A4; margin: 25mm; } }
+    `,
+    report: `
+      .doc-title { font-size: 2.2em; font-weight: 700; }
+      h1 { font-size: 1.6em; border-bottom: 1pt solid #333; padding-bottom: 0.15em; }
+      h2 { font-size: 1.35em; border-bottom: 0.5pt solid #aaa; padding-bottom: 0.15em; }
+      .page-wrap { max-width: 160mm; }
+      @media print { @page { size: A4; margin: 28mm; } }
+    `,
+    book: `
+      body { font-size: 12pt; }
+      .doc-title { font-size: 2.4em; font-weight: bold; text-align: left; border-bottom: 2pt solid #000; padding-bottom: 0.2em; }
+      h1 { font-size: 2em; border-bottom: 1.5pt solid #000; padding-bottom: 0.2em; margin-top: 3em; }
+      h2 { font-size: 1.5em; margin-top: 2.5em; }
+      .page-wrap { max-width: 155mm; }
+      @media print { @page { size: A4; margin: 25mm 20mm 30mm 30mm; } }
+    `,
+  }
+  return base + (overrides[template.id] ?? '')
+}
+
+// Build a complete HTML document for LaTeX-styled print/preview
+function getLatexRenderedDocument(html: string, title: string): string {
+  const css = getLatexTemplateCss(selectedLatexTemplate.value)
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <style>${css}</style>
+</head>
+<body>
+  <div class="page-wrap">
+    <div class="doc-content">${html}</div>
+  </div>
+</body>
+</html>`
+}
+
+function openLatexPreview() {
+  const title = extractTitle(mdInput.value) || 'Document'
+  const latexSrc = markdownToLatex(mdInput.value)
+  generatedLatex.value = formatLatexTemplate(selectedLatexTemplate.value, title, latexSrc)
+  latexPreviewHtmlDoc.value = getLatexRenderedDocument(renderedHtml.value, title)
+  showLatexPreview.value = true
+}
+
+function downloadLatex() {
+  const latexContent = markdownToLatex(mdInput.value)
+  const formattedLatex = formatLatexTemplate(
+    selectedLatexTemplate.value,
+    extractTitle(mdInput.value) || 'Document',
+    latexContent
+  )
+  
+  const element = document.createElement('a')
+  element.setAttribute('href', `data:text/plain;charset=utf-8,${encodeURIComponent(formattedLatex)}`)
+  element.setAttribute('download', 'document.tex')
+  element.style.display = 'none'
+  document.body.appendChild(element)
+  element.click()
+  document.body.removeChild(element)
+}
+
+function copyLatex() {
+  const latexContent = markdownToLatex(mdInput.value)
+  const formattedLatex = formatLatexTemplate(
+    selectedLatexTemplate.value,
+    extractTitle(mdInput.value) || 'Document',
+    latexContent
+  )
+  navigator.clipboard.writeText(formattedLatex)
+}
+
+function extractTitle(markdown: string): string {
+  const match = markdown.match(/^#\s+(.+?)$/m)
+  return match ? match[1].trim() : ''
+}
+
+function escapeHtml(text: string): string {
+  const div = document.createElement('div')
+  div.textContent = text
+  return div.innerHTML
+}
+
+function onTemplateSelect(template: LatexTemplate) {
+  selectedLatexTemplate.value = template
+  // Save selected template preference
+  try {
+    localStorage.setItem('selectedLatexTemplate', template.id)
+  } catch (_) {}
+}
+
+function onCustomTemplateAdd(template: LatexTemplate) {
+  templates.value.push(template)
+  selectedLatexTemplate.value = template
+  
+  // Save custom templates to localStorage
+  const customTemplates = templates.value.filter(t => t.isCustom)
+  try {
+    localStorage.setItem('customLatexTemplates', JSON.stringify(customTemplates))
+  } catch (_) {}
+}
+
+function onCustomTemplateUpdate(template: LatexTemplate) {
+  // Find and update the template
+  const templateIndex = templates.value.findIndex(t => t.id === template.id)
+  if (templateIndex !== -1) {
+    templates.value[templateIndex] = template
+    
+    // If the updated template was selected, update the selection
+    if (selectedLatexTemplate.value?.id === template.id) {
+      selectedLatexTemplate.value = template
+    }
+    
+    // Save custom templates to localStorage
+    const customTemplates = templates.value.filter(t => t.isCustom)
+    try {
+      localStorage.setItem('customLatexTemplates', JSON.stringify(customTemplates))
+    } catch (_) {}
+  }
+}
+
+function onCustomTemplateDelete(templateId: string) {
+  // Find and remove the template
+  const templateToDelete = templates.value.find(t => t.id === templateId)
+  if (templateToDelete?.isCustom) {
+    templates.value = templates.value.filter(t => t.id !== templateId)
+    
+    // If the deleted template was selected, select default
+    if (selectedLatexTemplate.value?.id === templateId) {
+      selectedLatexTemplate.value = getDefaultTemplate()
+    }
+    
+    // Save custom templates to localStorage
+    const customTemplates = templates.value.filter(t => t.isCustom)
+    try {
+      localStorage.setItem('customLatexTemplates', JSON.stringify(customTemplates))
+    } catch (_) {}
+  }
+}
+
 async function copyMarkdown() {
   await navigator.clipboard.writeText(mdInput.value)
 }
 
-function printPreview() {
-  window.print()
+// Build a clean HTML document for HTML-mode printing
+function getHtmlRenderedDocument(html: string, title: string): string {
+  const safeTitle = escapeHtml(title)
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>${safeTitle}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    @page { size: A4; margin: 20mm; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 11pt;
+      line-height: 1.6;
+      color: #111;
+      background: #fff;
+      padding: 0;
+    }
+    h1 { font-size: 2em; font-weight: 700; margin-top: 0.8em; margin-bottom: 0.4em; }
+    h2 { font-size: 1.5em; font-weight: 600; margin-top: 1em; margin-bottom: 0.3em; border-bottom: 1px solid #ddd; padding-bottom: 0.2em; }
+    h3 { font-size: 1.25em; font-weight: 600; margin-top: 0.9em; margin-bottom: 0.2em; }
+    h4 { font-size: 1.1em; font-weight: 600; margin-top: 0.8em; margin-bottom: 0.2em; }
+    h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }
+    p { margin: 0.5em 0; }
+    ul, ol { margin: 0.5em 0 0.5em 2em; }
+    li { margin: 0.15em 0; }
+    blockquote { margin: 0.7em 0; padding: 0.1em 0 0.1em 1em; border-left: 3px solid #bbb; color: #555; font-style: italic; }
+    code { font-family: "Courier New", monospace; font-size: 0.85em; background: #f3f3f3; padding: 0.1em 0.3em; border-radius: 3px; }
+    pre { font-family: "Courier New", monospace; font-size: 0.85em; background: #f3f3f3; border: 1px solid #ddd; padding: 0.8em 1em; border-radius: 3px; overflow-x: auto; margin: 0.7em 0; }
+    pre code { background: none; padding: 0; }
+    hr { border: none; border-top: 1px solid #ccc; margin: 1em 0; }
+    a { color: #0066cc; }
+    table { border-collapse: collapse; width: 100%; margin: 0.7em 0; }
+    th { border-bottom: 2px solid #999; padding: 0.3em 0.6em; text-align: left; font-weight: 600; }
+    td { border-bottom: 1px solid #ddd; padding: 0.3em 0.6em; }
+    h1, h2, h3 { page-break-after: avoid; }
+    pre, blockquote, table { page-break-inside: avoid; }
+  </style>
+</head>
+<body>${html}</body>
+</html>`
+}
+
+// Unified print: both modes open a clean new window with only the content.
+function printCurrentMode() {
+  const title = extractTitle(mdInput.value) || 'Document'
+  const doc = renderMode.value === 'html'
+    ? getHtmlRenderedDocument(renderedHtml.value, title)
+    : getLatexRenderedDocument(renderedHtml.value, title)
+  const win = window.open('', '_blank', 'width=1400,height=1150')
+  if (!win) return
+  win.document.write(doc)
+  win.document.close()
+  win.addEventListener('load', () => {
+    setTimeout(() => { win.print(); win.close() }, 250)
+  })
+  setTimeout(() => {
+    if (!win.closed) { win.print(); win.close() }
+  }, 800)
 }
 
 // Theme switching (auto | light | dark)
@@ -538,6 +843,24 @@ onMounted(() => {
   else if (typeof (mql as any).addListener === 'function') (mql as any).addListener(mqlHandler)
   // Ensure applied on mount
   applyTheme(themeMode.value)
+  
+  // Load custom LaTeX templates from localStorage
+  try {
+    const saved = localStorage.getItem('customLatexTemplates')
+    if (saved) {
+      const customTemplates = JSON.parse(saved) as LatexTemplate[]
+      templates.value = [...DEFAULT_LATEX_TEMPLATES, ...customTemplates]
+    }
+    
+    // Restore selected template preference
+    const selectedId = localStorage.getItem('selectedLatexTemplate')
+    if (selectedId) {
+      const found = templates.value.find(t => t.id === selectedId)
+      if (found) {
+        selectedLatexTemplate.value = found
+      }
+    }
+  } catch (_) {}
 })
 
 onBeforeUnmount(() => {
@@ -618,18 +941,64 @@ onBeforeUnmount(() => {
 
           <!-- Right: Preview -->
           <section class="flex flex-col rounded-lg border bg-card shadow-sm">
-          <div class="flex items-center justify-between gap-2 border-b p-3 md:p-4">
+          <!-- Header row: title, mode selector, action buttons -->
+          <div class="flex flex-wrap items-center gap-2 border-b p-3 md:p-4">
             <h2 class="text-sm font-medium tracking-tight">Preview</h2>
-            <div class="flex items-center gap-2">
-              <span class="hidden text-xs text-muted-foreground sm:inline">Drop PDF anywhere to import</span>
-              <Button size="sm" variant="secondary" @click="printPreview">Print</Button>
-              <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>
+            <!-- Mode toggle -->
+            <div class="inline-flex rounded-md border bg-background p-0.5">
+              <button
+                type="button"
+                class="px-2.5 py-1 text-xs rounded-md transition-colors"
+                :class="renderMode === 'html'
+                  ? 'bg-secondary text-secondary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+                :aria-pressed="renderMode === 'html'"
+                @click="renderMode = 'html'"
+              >HTML</button>
+              <button
+                type="button"
+                class="px-2.5 py-1 text-xs rounded-md transition-colors"
+                :class="renderMode === 'latex'
+                  ? 'bg-secondary text-secondary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+                :aria-pressed="renderMode === 'latex'"
+                @click="renderMode = 'latex'"
+              >LaTeX</button>
             </div>
+            <!-- Template name pill (only in LaTeX mode) -->
+            <button
+              v-if="renderMode === 'latex'"
+              type="button"
+              class="inline-flex items-center gap-1 rounded-full border bg-muted px-2.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+              title="Change template"
+              @click="showTemplateDialog = true"
+            >
+              <span>{{ selectedLatexTemplate.name }}</span>
+              <span class="opacity-60">▾</span>
+            </button>
+            <div class="flex-1" />
+            <span class="hidden text-xs text-muted-foreground sm:inline">Drop PDF to import</span>
+            <Button size="sm" variant="secondary" @click="printCurrentMode">Print</Button>
+            <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>
           </div>
+
+          <!-- LaTeX action bar (only in LaTeX mode) -->
+          <div v-if="renderMode === 'latex'" class="flex items-center gap-2 border-b bg-muted/30 px-3 py-1.5">
+            <span class="text-xs text-muted-foreground">LaTeX export:</span>
+            <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="openLatexPreview">Preview / Source</Button>
+            <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="downloadLatex">Download .tex</Button>
+            <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="copyLatex">Copy .tex</Button>
+            <div class="flex-1" />
+            <Button size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="showTemplateDialog = true">Manage templates</Button>
+          </div>
+
           <div class="p-3 md:p-4">
             <div
               ref="previewRef"
-              class="print-content prose max-w-none leading-relaxed outline-none"
+              :class="[
+                'max-w-none leading-relaxed outline-none',
+                renderMode === 'html' ? 'print-content prose' : 'latex-preview'
+              ]"
               v-html="renderedHtml"
               :contenteditable="true"
               tabindex="0"
@@ -652,11 +1021,32 @@ onBeforeUnmount(() => {
         <p class="mt-1 text-xs text-muted-foreground">Up to 10 MB and 100 pages</p>
       </div>
     </div>
+
+    <!-- LaTeX Template Dialog -->
+    <LatexTemplateDialog
+      :is-open="showTemplateDialog"
+      :templates="templates"
+      :selected-template="selectedLatexTemplate"
+      @template-select="onTemplateSelect"
+      @custom-template-add="onCustomTemplateAdd"
+      @custom-template-update="onCustomTemplateUpdate"
+      @custom-template-delete="onCustomTemplateDelete"
+      @close="showTemplateDialog = false"
+    />
+
+    <!-- LaTeX Preview Dialog -->
+    <LatexPreviewDialog
+      :is-open="showLatexPreview"
+      :latex-content="generatedLatex"
+      :preview-html-doc="latexPreviewHtmlDoc"
+      @close="showLatexPreview = false"
+    />
   </div>
   <!-- eslint-disable-next-line vue/no-v-html -->
 </template>
 
 <style scoped>
+/* ─── HTML mode prose styles ────────────────────────────────────── */
 .prose :deep(h1) { @apply scroll-m-20 text-3xl font-bold tracking-tight; }
 .prose :deep(h2) { @apply scroll-m-20 border-b pb-2 text-xl font-semibold tracking-tight first:mt-0; }
 .prose :deep(h3) { @apply scroll-m-20 text-lg font-semibold tracking-tight; }
@@ -676,4 +1066,70 @@ onBeforeUnmount(() => {
 .prose :deep(code) { @apply rounded bg-muted px-1 py-0.5; }
 .prose :deep(pre) { @apply my-4 overflow-x-auto rounded bg-muted p-4; }
 .prose :deep(a) { @apply text-primary underline underline-offset-4; }
+
+/* ─── LaTeX mode preview styles ─────────────────────────────────── */
+.latex-preview {
+  font-family: "Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif;
+  font-size: 11pt;
+  line-height: 1.55;
+  color: #1a1a1a;
+  background: #fff;
+  padding: 1.8em 2em;
+  border-radius: 3px;
+}
+/* Headings */
+.latex-preview :deep(h1) {
+  font-size: 1.7em; font-weight: bold;
+  margin-top: 1.8em; margin-bottom: 0.4em;
+}
+.latex-preview :deep(h2) {
+  font-size: 1.3em; font-weight: bold;
+  border-bottom: 1px solid #ccc; padding-bottom: 0.15em;
+  margin-top: 1.5em; margin-bottom: 0.35em;
+}
+.latex-preview :deep(h3) {
+  font-size: 1.1em; font-weight: bold;
+  margin-top: 1.2em; margin-bottom: 0.3em;
+}
+.latex-preview :deep(:where(h1, h2, h3, h4, h5, h6):first-child) { margin-top: 0; }
+/* Body text */
+.latex-preview :deep(p) { margin: 0.6em 0; line-height: 1.6; }
+/* Lists */
+.latex-preview :deep(ul) { margin: 0.6em 0 0.6em 2.2em; list-style: disc; }
+.latex-preview :deep(ol) { margin: 0.6em 0 0.6em 2.2em; list-style: decimal; }
+.latex-preview :deep(li) { margin: 0.2em 0; line-height: 1.5; }
+/* Inline code / verbatim */
+.latex-preview :deep(code) {
+  font-family: "Courier New", "Lucida Console", monospace;
+  font-size: 0.82em;
+  background: #f4f4f4;
+  padding: 0.1em 0.3em;
+  border-radius: 2px;
+}
+/* Block code (listing) */
+.latex-preview :deep(pre) {
+  font-family: "Courier New", "Lucida Console", monospace;
+  font-size: 0.82em;
+  background: #f4f4f4;
+  border: 1px solid #ddd;
+  border-left: 3px solid #999;
+  padding: 0.85em 1em;
+  border-radius: 2px;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+.latex-preview :deep(pre code) { background: none; padding: 0; font-size: 1em; }
+/* Blockquote */
+.latex-preview :deep(blockquote) {
+  margin: 0.8em 0; padding: 0.1em 0 0.1em 1em;
+  border-left: 3px solid #aaa; font-style: italic; color: #444;
+}
+/* Rule */
+.latex-preview :deep(hr) { border: none; border-top: 1px solid #bbb; margin: 1.5em 0; }
+/* Links */
+.latex-preview :deep(a) { color: #000066; text-decoration: underline; }
+/* Tables */
+.latex-preview :deep(table) { border-collapse: collapse; width: 100%; margin: 1em 0; }
+.latex-preview :deep(th) { border-bottom: 2px solid #000; padding: 0.3em 0.6em; text-align: left; font-weight: bold; }
+.latex-preview :deep(td) { border-bottom: 1px solid #ccc; padding: 0.3em 0.6em; }
 </style>

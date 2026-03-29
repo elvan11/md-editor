@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "universe": "the-usual-suspects",
+  "allowMixing": false,
+  "maxTeamSize": 12
+}
