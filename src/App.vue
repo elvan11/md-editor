@@ -21,6 +21,8 @@ type PdfTextSegment = {
   x: number
   width: number
   fontSize: number
+  isBold: boolean
+  fontName: string
 }
 
 type ExtractedLine = {
@@ -28,6 +30,10 @@ type ExtractedLine = {
   hasTabs: boolean
   fontSize: number
   breakAfter: boolean
+  isBold: boolean
+  boldPrefix: boolean
+  startX: number
+  fontName: string
 }
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
@@ -215,22 +221,61 @@ function quantizeY(value: number): number {
   return Math.round(value / 2) * 2
 }
 
+function isFontBold(fontName: string): boolean {
+  const upper = String(fontName || '').toUpperCase()
+  return upper.includes('BOLD') || upper.includes('HEAVY') || upper.includes('BLACK') || /[Ww]eight.*[67]/i.test(fontName)
+}
+
+const BULLET_CHARS = '•◦▪▸►‣·–−—‐'
+
+function detectListItem(text: string): { isListItem: boolean; cleanText: string } {
+  const trimmed = text.trimStart()
+  
+  // Check for bullet points
+  if (new RegExp(`^[${BULLET_CHARS}]\\s+`).test(trimmed)) {
+    return {
+      isListItem: true,
+      cleanText: trimmed.replace(new RegExp(`^[${BULLET_CHARS}]\\s+`), '- ')
+    }
+  }
+  
+  // Check for numbered lists
+  if (/^\d+[.)]\s+/.test(trimmed)) {
+    return {
+      isListItem: true,
+      cleanText: trimmed
+    }
+  }
+  
+  return { isListItem: false, cleanText: text }
+}
+
 function extractLinesFromPdfTextContent(textContent: any): ExtractedLine[] {
+  // textContent.styles maps internal PDF font IDs (e.g. "g_d0_f0") to readable properties.
+  // We must use this to get the actual font family name — the raw fontName on each item
+  // is an opaque internal reference, not "Inter-Bold" or "Helvetica-Bold".
+  const styles: Record<string, { fontFamily?: string }> = (textContent as any).styles || {}
   const rowMap = new Map<number, PdfTextSegment[]>()
 
   for (const rawItem of textContent.items || []) {
-    const text = String((rawItem as any).str || '').replace(/\s+/g, ' ').trim()
+    // Don't trim — leading/trailing spaces in PDF items encode word boundaries.
+    // Only collapse runs of multiple spaces to one.
+    const text = String((rawItem as any).str || '').replace(/ {2,}/g, ' ')
     if (!text) continue
 
     const transform = Array.isArray((rawItem as any).transform) ? (rawItem as any).transform : []
     const x = Number(transform[4] || 0)
     const y = Number(transform[5] || 0)
-    const width = Number((rawItem as any).width || Math.max(4, text.length * 4))
+    const width = Number((rawItem as any).width || 0)
     const fontSize = Math.abs(Number(transform[0] || transform[3] || (rawItem as any).height || 12))
+    const internalFontName = String((rawItem as any).fontName || '')
+    // Resolve to readable font family (e.g. "Inter-Bold") via the styles map.
+    const resolvedFamily = String(styles[internalFontName]?.fontFamily || internalFontName)
+    const isBold = isFontBold(resolvedFamily)
 
     const yKey = quantizeY(y)
     const segments = rowMap.get(yKey) || []
-    segments.push({ text, x, width, fontSize })
+    segments.push({ text, x, width, fontSize, isBold, fontName: resolvedFamily })
     rowMap.set(yKey, segments)
   }
 
@@ -238,62 +283,132 @@ function extractLinesFromPdfTextContent(textContent: any): ExtractedLine[] {
     .map(([y, segments]) => ({ y, segments: segments.sort((a, b) => a.x - b.x) }))
     .sort((a, b) => b.y - a.y)
 
+  // Compute the document's typical inter-line gap (body text line height).
+  // We take the 40th-percentile of all positive gaps so that large inter-paragraph
+  // or inter-section gaps don't inflate the "normal" baseline.
+  // A real paragraph break is when a gap is >= 1.5x that typical value.
+  const allGaps = rows
+    .slice(0, -1)
+    .map((row, i) => Math.abs(row.y - rows[i + 1].y))
+    .filter(g => g > 0)
+  const sortedGaps = [...allGaps].sort((a, b) => a - b)
+  const typicalGap = sortedGaps.length > 0
+    ? sortedGaps[Math.floor(sortedGaps.length * 0.4)]
+    : 14
+  const breakThreshold = typicalGap * 1.5
+
   const lines: ExtractedLine[] = []
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i]
     let text = ''
     let hasTabs = false
-    let previousEnd = 0
-    let previousCharWidth = 5
+    let hasAnyBold = false
 
-    row.segments.forEach((segment, segmentIndex) => {
-      if (segmentIndex > 0) {
+    // Pre-compute font size using only segments that contain visible text.
+    // This is used for gap thresholds and avoids being skewed by whitespace items.
+    const visibleSegs = row.segments.filter(s => s.text.trim().length > 0)
+    const rowFontSize = visibleSegs.length > 0
+      ? visibleSegs.reduce((sum, s) => sum + s.fontSize, 0) / visibleSegs.length
+      : 12
+
+    let previousEnd = 0
+
+    row.segments.forEach((segment) => {
+      const isWhitespace = segment.text.trim() === ''
+
+      if (isWhitespace) {
+        // Space-only items mark word boundaries; insert a space and advance position.
+        if (text.length > 0 && !text.endsWith(' ') && !text.endsWith('\t')) {
+          text += ' '
+        }
+        previousEnd = segment.x + segment.width
+        return
+      }
+
+      if (previousEnd > 0) {
         const gap = segment.x - previousEnd
-        const tabThreshold = Math.max(24, previousCharWidth * 6)
-        const spaceThreshold = Math.max(6, previousCharWidth * 1.75)
-        if (gap > tabThreshold) {
+        // A word space in typical fonts is ~0.25 em.
+        // 0.1 em catches any real gap while ignoring sub-0.05 em kerning adjustments.
+        const spaceThreshold = rowFontSize * 0.1
+        const tabThreshold = rowFontSize * 2.5
+        const alreadySpaced = text.endsWith(' ') || text.endsWith('\t')
+        const segLeadsSpace = segment.text.startsWith(' ')
+
+        if (gap > tabThreshold && !alreadySpaced) {
           text += '\t'
           hasTabs = true
-        } else if (gap > spaceThreshold) {
+        } else if (gap > spaceThreshold && !alreadySpaced && !segLeadsSpace) {
           text += ' '
         }
       }
-      text += segment.text
+
+      // If we already have a trailing space, strip the segment's own leading space
+      // to avoid doubling up.
+      const segText = (text.endsWith(' ') || text.endsWith('\t'))
+        ? segment.text.trimStart()
+        : segment.text
+      text += segText
       previousEnd = segment.x + segment.width
-      previousCharWidth = segment.width / Math.max(segment.text.length, 1)
+      if (segment.isBold) hasAnyBold = true
     })
 
-    const normalized = text.replace(/[ \t]+$/g, '').replace(/[ ]{2,}/g, ' ')
+    const normalized = text.replace(/[ \t]+$/g, '').replace(/ {2,}/g, ' ').trim()
     if (!normalized) continue
 
-    const avgFontSize = row.segments.reduce((sum, segment) => sum + segment.fontSize, 0) / row.segments.length
+    const dominantFont = visibleSegs[0]?.fontName || ''
+    const boldPrefix = visibleSegs[0]?.isBold ?? false
+    const startX = visibleSegs[0]?.x ?? 0
     const nextRow = rows[i + 1]
     const rowGap = nextRow ? Math.abs(row.y - nextRow.y) : 0
-    const breakAfter = rowGap > avgFontSize * 1.7
+    const breakAfter = rowGap > breakThreshold
 
     lines.push({
       text: normalized,
       hasTabs,
-      fontSize: avgFontSize,
+      fontSize: rowFontSize,
       breakAfter,
+      isBold: hasAnyBold,
+      boldPrefix,
+      startX,
+      fontName: dominantFont,
     })
   }
 
   return lines
 }
 
-function looksLikeHeading(text: string, fontSize: number, bodyFontSize: number): boolean {
+function looksLikeHeading(text: string, fontSize: number, isBoldOrFontSize: number | boolean, bodyFontSizeOrUndefined?: number): boolean {
+  // Handle both old and new call signatures for backward compatibility
+  let isBold = false
+  let bodyFontSize = 12
+  
+  if (typeof isBoldOrFontSize === 'boolean') {
+    isBold = isBoldOrFontSize
+    bodyFontSize = bodyFontSizeOrUndefined || 12
+  } else {
+    bodyFontSize = isBoldOrFontSize
+  }
+
   const plain = text.trim()
   if (!plain) return false
-  if (plain.length > 90) return false
+  if (plain.length > 120) return false
   if (/^[-*]\s+/.test(plain)) return false
   if (/^\d+[\.\)]\s+/.test(plain)) return false
   if (plain.includes('\t')) return false
+  if (new RegExp(`^[${BULLET_CHARS}]`).test(plain)) return false
+  // Inline bold labels like "Type of partner: some long text" are not headings.
+  // A colon followed by more content (not just end-of-string) is a strong indicator.
+  if (/:\s+\S/.test(plain)) return false
 
   const ratio = fontSize / Math.max(bodyFontSize, 1)
-  if (ratio < 1.28) return false
-
   const wordCount = plain.split(/\s+/).length
+
+  // Bold + same/similar size: short standalone lines are headings
+  if (isBold && ratio >= 0.9 && wordCount <= 10) return true
+  
+  // Non-bold needs to be significantly larger
+  if (ratio < 1.2) return false
+
   return wordCount <= 14
 }
 
@@ -343,10 +458,40 @@ function tabbedBlockToMarkdownTable(block: ExtractedLine[]): string[] {
 
 function linesToMarkdown(lines: ExtractedLine[], bodyFontSize: number): string {
   const out: string[] = []
+  let buffer: string[] = []
+  let inList = false
+
+  // Compute the document's left margin and list-indent threshold.
+  // Lines clearly to the right of the left margin are likely list items.
+  const nonEmptyXs = lines.filter(l => l.text.trim()).map(l => l.startX).sort((a, b) => a - b)
+  const leftMargin = nonEmptyXs[Math.floor(nonEmptyXs.length * 0.1)] ?? 0
+  const listIndentMin = leftMargin + bodyFontSize * 0.4
+
+  // Detect "ShortLabel: description" patterns used in definition-style bullet lists.
+  // Works even when font metadata doesn't expose bold, and even when the
+  // PDF bullet glyph isn't mapped to a Unicode bullet character.
+  function asLabelItem(text: string): RegExpMatchArray | null {
+    // Label: capitalised, no colon inside it, ≤68 chars, ≤9 words.
+    const m = text.match(/^([A-Z][^:\n]{0,67}):\s+(\S.+)/)
+    if (!m) return null
+    const words = m[1].trim().split(/\s+/).length
+    return words <= 9 ? m : null
+  }
+
+  function flushBuffer(tight = false) {
+    if (buffer.length === 0) return
+    out.push(buffer.join(' '))
+    if (!tight) out.push('')
+    buffer = []
+  }
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]
+
+    // ── Tables ────────────────────────────────────────────────────────────────
     if (line.hasTabs) {
+      flushBuffer()
+      inList = false
       const block: ExtractedLine[] = [line]
       while (i + 1 < lines.length && lines[i + 1].hasTabs) {
         block.push(lines[i + 1])
@@ -357,23 +502,66 @@ function linesToMarkdown(lines: ExtractedLine[], bodyFontSize: number): string {
       continue
     }
 
-    const normalized = normalizeListPrefix(line.text.trim())
-    if (!normalized) {
+    const trimmed = line.text.trim()
+    if (!trimmed) {
+      flushBuffer()
+      inList = false
+      continue
+    }
+
+    // ── Headings ──────────────────────────────────────────────────────────────
+    if (looksLikeHeading(trimmed, line.fontSize, line.isBold, bodyFontSize)) {
+      flushBuffer()
+      inList = false
+      const level = headingLevel(line.fontSize, bodyFontSize)
+      out.push(`${'#'.repeat(level)} ${trimmed}`)
       out.push('')
       continue
     }
 
-    if (looksLikeHeading(normalized, line.fontSize, bodyFontSize)) {
-      const level = headingLevel(line.fontSize, bodyFontSize)
-      out.push(`${'#'.repeat(level)} ${normalized}`)
-    } else {
-      out.push(normalized)
+    // ── Explicit bullet / numbered list item ──────────────────────────────────
+    const listDetection = detectListItem(trimmed)
+    if (listDetection.isListItem) {
+      if (inList) flushBuffer(true)
+      else flushBuffer(false)
+      inList = true
+      const clean = listDetection.cleanText
+      // Promote bold label inside item if font data supports it
+      const boldLabel = line.boldPrefix
+        ? clean.match(/^(-\s+|\d+\.\s+)([^:]{1,60}):\s+(.+)/)
+        : null
+      buffer = [boldLabel ? `${boldLabel[1]}**${boldLabel[2]}:** ${boldLabel[3]}` : clean]
+      if (line.breakAfter) { flushBuffer(false); inList = false }
+      continue
     }
 
+    // ── Label-style item: "ShortLabel: description" ───────────────────────────
+    // Primary signal: text pattern. Guard: line is indented, OR first segment
+    // is bold (font-based detection), OR label is very short (≤4 words, very
+    // unlikely to be a prose sentence).
+    const labelM = asLabelItem(trimmed)
+    if (labelM) {
+      const labelWords = labelM[1].trim().split(/\s+/).length
+      const isIndented = line.startX >= listIndentMin
+      if (isIndented || line.boldPrefix || labelWords <= 4) {
+        if (inList) flushBuffer(true)
+        else flushBuffer(false)
+        inList = true
+        buffer = [`- **${labelM[1].trim()}:** ${labelM[2]}`]
+        if (line.breakAfter) { flushBuffer(false); inList = false }
+        continue
+      }
+    }
+
+    // ── Body text / list-item continuation ────────────────────────────────────
+    buffer.push(line.isBold ? `**${trimmed}**` : trimmed)
     if (line.breakAfter) {
-      out.push('')
+      flushBuffer(false)
+      inList = false
     }
   }
+
+  flushBuffer()
 
   return out
     .join('\n')
@@ -395,8 +583,7 @@ async function pdfToMarkdown(file: File): Promise<string> {
     importStatus.value = `Reading page ${pageNo}/${pdf.numPages}...`
     const page = await pdf.getPage(pageNo)
     const textContent = await page.getTextContent({
-      normalizeWhitespace: true,
-      disableCombineTextItems: false,
+      disableCombineTextItems: true,
     })
     pages.push(extractLinesFromPdfTextContent(textContent))
   }
