@@ -425,6 +425,44 @@ function normalizeListPrefix(text: string): string {
     .replace(/^\((\d+)\)\s+/, '$1. ')
 }
 
+function isMonospaceFont(fontName: string): boolean {
+  const lower = String(fontName || '').toLowerCase()
+  return (
+    lower.includes('mono') ||
+    lower.includes('courier') ||
+    lower.includes('consolas') ||
+    lower.includes('code') ||
+    lower.includes('fixed') ||
+    lower.includes('typewriter') ||
+    lower.includes('fira') ||
+    lower.includes('inconsolata') ||
+    lower.includes('menlo') ||
+    lower.includes('monaco') ||
+    lower.includes('lucida console')
+  )
+}
+
+function extractLineNumber(text: string): { num: number; rest: string } | null {
+  // Matches "42 <code line>" but NOT "42. list item" or "42) list item"
+  const m = text.match(/^(\d+)\s+(.+)/)
+  if (!m) return null
+  return { num: parseInt(m[1], 10), rest: m[2] }
+}
+
+function detectCodeLanguage(code: string): string {
+  if (/<\!doctype\s+html/i.test(code) || /<html[\s>]/i.test(code)) return 'html'
+  if (/^\s*(import\s|export\s|const\s|let\s|var\s|function\s|class\s)/m.test(code) || /=>\s*[{(]/.test(code)) return 'javascript'
+  if (/^\s*(def |class |import |from )\w/m.test(code)) return 'python'
+  if (/^\s*(public|private|protected|class|interface|void)\s+/m.test(code)) return 'java'
+  return ''
+}
+
+function looksLikeCodeContent(text: string): boolean {
+  return /[<>{};()\[\]=\/\\]/.test(text) ||
+    /^\s*(import|export|const|let|var|function|class|def|return|if|for|while|elif|else)\b/.test(text) ||
+    /^#!/.test(text)
+}
+
 function splitTabbedColumns(text: string): string[] {
   return text.split('\t').map((part) => part.trim())
 }
@@ -507,6 +545,63 @@ function linesToMarkdown(lines: ExtractedLine[], bodyFontSize: number): string {
       flushBuffer()
       inList = false
       continue
+    }
+
+    // ── Code block (monospace font OR sequential line-numbered listing) ──────
+    {
+      const isMonospace = isMonospaceFont(line.fontName)
+      const firstNum = extractLineNumber(trimmed)
+      const nextTrimmed = (lines[i + 1]?.text ?? '').trim()
+      const secondNum = extractLineNumber(nextTrimmed)
+      // Require at least two consecutive numbered lines AND code-like content
+      // to avoid treating "1 First item / 2 Second item" prose as code.
+      const isSequential =
+        firstNum !== null &&
+        secondNum !== null &&
+        secondNum.num === firstNum.num + 1 &&
+        (looksLikeCodeContent(firstNum.rest) || looksLikeCodeContent(secondNum.rest))
+
+      if (isMonospace || isSequential) {
+        flushBuffer()
+        inList = false
+
+        const useLineNumbers = isSequential && !isMonospace
+        const codeLines: string[] = []
+        let expectedNum = firstNum?.num ?? 1
+
+        while (i < lines.length) {
+          const cur = lines[i]
+          const curTrimmed = cur.text.trim()
+          if (!curTrimmed) { i++; continue }
+
+          const curNum = extractLineNumber(curTrimmed)
+          const curIsMono = isMonospaceFont(cur.fontName)
+
+          if (useLineNumbers) {
+            if (curNum && curNum.num === expectedNum) {
+              codeLines.push(curNum.rest)
+              expectedNum++
+              i++
+            } else {
+              break
+            }
+          } else {
+            if (!curIsMono) break
+            codeLines.push(curTrimmed)
+            i++
+          }
+        }
+        i-- // compensate for outer loop i += 1
+
+        if (codeLines.length > 0) {
+          const lang = detectCodeLanguage(codeLines.join('\n'))
+          out.push(`\`\`\`${lang}`)
+          out.push(...codeLines)
+          out.push('```')
+          out.push('')
+        }
+        continue
+      }
     }
 
     // ── Headings ──────────────────────────────────────────────────────────────
