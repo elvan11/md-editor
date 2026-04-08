@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import Button from '@/components/ui/button/Button.vue'
@@ -12,6 +12,7 @@ import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { gfm } from 'turndown-plugin-gfm'
 import { DEFAULT_LATEX_TEMPLATES, getDefaultTemplate, formatLatexTemplate, type LatexTemplate } from '@/lib/latex-templates'
 import { markdownToLatex } from '@/lib/markdown-to-latex'
+import mermaid from 'mermaid'
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024
 const MAX_PDF_PAGES = 100
@@ -44,6 +45,20 @@ const md = new MarkdownIt({
   typographer: true,
   breaks: true,
 })
+
+// Override fence renderer to support Mermaid diagrams
+const _origFence = md.renderer.rules.fence
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const token = tokens[idx]
+  const lang = (token.info || '').trim().split(/\s+/)[0].toLowerCase()
+  if (lang === 'mermaid') {
+    const escaped = md.utils.escapeHtml(token.content.trim())
+    const dataSource = escaped.replace(/"/g, '&quot;')
+    return `<pre class="mermaid" data-source="${dataSource}">${escaped}</pre>\n`
+  }
+  if (_origFence) return _origFence(tokens, idx, options, env, self)
+  return self.renderToken(tokens, idx, options)
+}
 
 // LaTeX Templates State
 const templates = ref<LatexTemplate[]>([
@@ -88,7 +103,7 @@ Live preview on the right. Try editing this text.
 
 const renderedHtml = computed(() => {
   const raw = md.render(mdInput.value)
-  return DOMPurify.sanitize(raw)
+  return DOMPurify.sanitize(raw, { ADD_ATTR: ['data-source'] })
 })
 
 const previewRef = ref<HTMLDivElement | null>(null)
@@ -97,6 +112,43 @@ const importStatus = ref('')
 const importError = ref('')
 const dragDepth = ref(0)
 const isDraggingPdf = computed(() => dragDepth.value > 0)
+
+// Mermaid helpers — always use the light theme so diagrams are legible on any background
+// and print cleanly regardless of the app's dark/light mode.
+function initMermaid() {
+  mermaid.initialize({ startOnLoad: false, theme: 'default' })
+}
+
+async function runMermaid() {
+  if (!previewRef.value) return
+  const elements = Array.from(
+    previewRef.value.querySelectorAll<HTMLElement>('.mermaid:not([data-processed])')
+  )
+  if (elements.length === 0) return
+  try {
+    await mermaid.run({ nodes: elements })
+  } catch (e) {
+    console.warn('Mermaid render error:', e)
+  }
+}
+
+async function reinitAndRerunMermaid() {
+  initMermaid()
+  if (!previewRef.value) return
+  // Restore original source text so mermaid can re-render
+  previewRef.value.querySelectorAll<HTMLElement>('.mermaid[data-processed]').forEach(el => {
+    const src = el.dataset.source
+    if (src) {
+      el.innerHTML = src
+      el.removeAttribute('data-processed')
+    }
+  })
+  await nextTick()
+  await runMermaid()
+}
+
+// Re-run mermaid after every markdown render update
+watch(renderedHtml, () => { nextTick().then(() => runMermaid()) })
 
 const td = new TurndownService({
   headingStyle: 'atx',
@@ -865,9 +917,12 @@ function getLatexTemplateCss(template: LatexTemplate): string {
     em { font-style: italic; }
     del { text-decoration: line-through; color: #999; }
     img { max-width: 100%; }
+    pre.mermaid { background: none !important; border: none !important; padding: 0 !important; margin: 1em 0; }
+    pre.mermaid svg { max-width: 100%; height: auto; display: block; }
     @media print {
       body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       pre { page-break-inside: avoid; }
+      pre.mermaid { background: none !important; border: none !important; }
       h1, h2, h3, h4 { page-break-after: avoid; }
     }
   `
@@ -1052,6 +1107,8 @@ function getHtmlRenderedDocument(html: string, title: string): string {
     code { font-family: "Courier New", monospace; font-size: 0.85em; background: #f3f3f3; padding: 0.1em 0.3em; border-radius: 3px; }
     pre { font-family: "Courier New", monospace; font-size: 0.85em; background: #f3f3f3; border: 1px solid #ddd; padding: 0.8em 1em; border-radius: 3px; overflow-x: auto; margin: 0.7em 0; }
     pre code { background: none; padding: 0; }
+    pre.mermaid { background: none; border: none; padding: 0.5em 0; text-align: center; }
+    pre.mermaid svg { max-width: 100%; height: auto; }
     hr { border: none; border-top: 1px solid #ccc; margin: 1em 0; }
     a { color: #0066cc; }
     table { border-collapse: collapse; width: 100%; margin: 0.7em 0; }
@@ -1068,9 +1125,12 @@ function getHtmlRenderedDocument(html: string, title: string): string {
 // Unified print: both modes open a clean new window with only the content.
 function printCurrentMode() {
   const title = extractTitle(mdInput.value) || 'Document'
+  // Use the live DOM innerHTML so Mermaid SVGs (already rendered) are included.
+  // Falling back to renderedHtml only if the preview element isn't available.
+  const liveHtml = previewRef.value ? previewRef.value.innerHTML : renderedHtml.value
   const doc = renderMode.value === 'html'
-    ? getHtmlRenderedDocument(renderedHtml.value, title)
-    : getLatexRenderedDocument(renderedHtml.value, title)
+    ? getHtmlRenderedDocument(liveHtml, title)
+    : getLatexRenderedDocument(liveHtml, title)
   const win = window.open('', '_blank', 'width=1400,height=1150')
   if (!win) return
   win.document.write(doc)
@@ -1125,6 +1185,9 @@ onMounted(() => {
   else if (typeof (mql as any).addListener === 'function') (mql as any).addListener(mqlHandler)
   // Ensure applied on mount
   applyTheme(themeMode.value)
+  // Initialize mermaid and render any diagrams in the initial content
+  initMermaid()
+  nextTick().then(() => runMermaid())
   
   // Load custom LaTeX templates from localStorage
   try {
@@ -1414,4 +1477,19 @@ onBeforeUnmount(() => {
 .latex-preview :deep(table) { border-collapse: collapse; width: 100%; margin: 1em 0; }
 .latex-preview :deep(th) { border-bottom: 2px solid #000; padding: 0.3em 0.6em; text-align: left; font-weight: bold; }
 .latex-preview :deep(td) { border-bottom: 1px solid #ccc; padding: 0.3em 0.6em; }
+
+/* Mermaid diagram containers */
+.prose :deep(pre.mermaid),
+.latex-preview :deep(pre.mermaid) {
+  background: transparent;
+  border: none;
+  padding: 0.5rem 0;
+  text-align: center;
+  overflow-x: auto;
+}
+.prose :deep(pre.mermaid svg),
+.latex-preview :deep(pre.mermaid svg) {
+  max-width: 100%;
+  height: auto;
+}
 </style>
