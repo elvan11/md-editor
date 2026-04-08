@@ -42,40 +42,4 @@ MIT
 
 ## Changelog
 
-### 2026-04-08
-- Mermaid diagram support in live preview (HTML + LaTeX modes)
-- Mermaid diagrams in HTML and LaTeX print output
-- Uses `default` (light) mermaid theme for print compatibility
-
-### 2026-03-30
-- Enhanced PDF parsing with font weight detection and improved markdown generation
-- Refactored code structure for improved readability and maintainability
-
-### 2026-03-29
-- Added LaTeX preview modal for rendering LaTeX content
-- Added LaTeX template management component for predefined and custom templates
-- Implemented Markdown to LaTeX conversion
-
-### 2026-02-25
-- Enhanced print styles for headings with improved layout and margin adjustments
-
-### 2026-02-20
-- Added PDF import functionality with drag-and-drop support
-- Automatic PDF text extraction and Markdown conversion
-- User feedback for import status and errors
-- Added Supabase integration and configuration files
-
-### 2026-01-22
-- Updated README with comprehensive project description, features, and tech stack
-- Enhanced print styles for Markdown content
-
-### 2025-09-15
-- Added initial HTML structure, CSS styles, and SVG assets
-- Implemented theme switching and UI components
-- Added GitHub Actions workflow for deploying to GitHub Pages
-- Updated workflow to use Node.js 20 with type checking
-- Added deployment documentation
-- Fixed SVG path coordinates
-
-### 2025-09-14
-- Initialized markdown editor project with Vue 3 and Vite
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
