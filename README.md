@@ -10,6 +10,7 @@ A fast, split-view Markdown editor with live preview, rich paste handling, and p
 - PDF import with automatic Markdown conversion
 - Mermaid diagram support in live preview and print output
 - LaTeX export with customizable templates
+- DOCX export for the current rendered HTML or LaTeX preview
 - Print view shows only the rendered Markdown content
 - Light / dark / auto theme toggle
 

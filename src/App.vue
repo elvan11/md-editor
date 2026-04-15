@@ -12,6 +12,7 @@ import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { gfm } from 'turndown-plugin-gfm'
 import { DEFAULT_LATEX_TEMPLATES, getDefaultTemplate, formatLatexTemplate, type LatexTemplate } from '@/lib/latex-templates'
 import { markdownToLatex } from '@/lib/markdown-to-latex'
+import { downloadDocxDocument } from '@/lib/docx-export'
 import mermaid from 'mermaid'
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -107,9 +108,12 @@ const renderedHtml = computed(() => {
 })
 
 const previewRef = ref<HTMLDivElement | null>(null)
+const previewActionsMenuRef = ref<HTMLDivElement | null>(null)
 const isImportingPdf = ref(false)
 const importStatus = ref('')
 const importError = ref('')
+const exportError = ref('')
+const previewActionsMenuOpen = ref(false)
 const dragDepth = ref(0)
 const isDraggingPdf = computed(() => dragDepth.value > 0)
 
@@ -1009,6 +1013,15 @@ function extractTitle(markdown: string): string {
   return match ? match[1].trim() : ''
 }
 
+function getSafeDocumentFileStem(title: string): string {
+  const normalized = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return normalized || 'document'
+}
+
 function escapeHtml(text: string): string {
   const div = document.createElement('div')
   div.textContent = text
@@ -1076,6 +1089,28 @@ async function copyMarkdown() {
   await navigator.clipboard.writeText(mdInput.value)
 }
 
+function getCurrentRenderedDocument() {
+  const title = extractTitle(mdInput.value) || 'Document'
+  const liveHtml = previewRef.value ? previewRef.value.innerHTML : renderedHtml.value
+  const documentHtml = renderMode.value === 'html'
+    ? getHtmlRenderedDocument(liveHtml, title)
+    : getLatexRenderedDocument(liveHtml, title)
+
+  return { title, documentHtml }
+}
+
+async function downloadCurrentModeDocx() {
+  exportError.value = ''
+
+  try {
+    const { title, documentHtml } = getCurrentRenderedDocument()
+    const fileName = `${getSafeDocumentFileStem(title)}-${renderMode.value}`
+    await downloadDocxDocument({ htmlDocument: documentHtml, fileName })
+  } catch (error) {
+    exportError.value = error instanceof Error ? error.message : 'DOCX export failed.'
+  }
+}
+
 // Build a clean HTML document for HTML-mode printing
 function getHtmlRenderedDocument(html: string, title: string): string {
   const safeTitle = escapeHtml(title)
@@ -1124,16 +1159,10 @@ function getHtmlRenderedDocument(html: string, title: string): string {
 
 // Unified print: both modes open a clean new window with only the content.
 function printCurrentMode() {
-  const title = extractTitle(mdInput.value) || 'Document'
-  // Use the live DOM innerHTML so Mermaid SVGs (already rendered) are included.
-  // Falling back to renderedHtml only if the preview element isn't available.
-  const liveHtml = previewRef.value ? previewRef.value.innerHTML : renderedHtml.value
-  const doc = renderMode.value === 'html'
-    ? getHtmlRenderedDocument(liveHtml, title)
-    : getLatexRenderedDocument(liveHtml, title)
+  const { documentHtml } = getCurrentRenderedDocument()
   const win = window.open('', '_blank', 'width=1400,height=1150')
   if (!win) return
-  win.document.write(doc)
+  win.document.write(documentHtml)
   win.document.close()
   win.addEventListener('load', () => {
     setTimeout(() => { win.print(); win.close() }, 250)
@@ -1176,6 +1205,30 @@ watch(themeMode, (mode) => {
   applyTheme(mode)
 })
 
+watch(renderMode, () => {
+  previewActionsMenuOpen.value = false
+})
+
+function togglePreviewActionsMenu() {
+  previewActionsMenuOpen.value = !previewActionsMenuOpen.value
+}
+
+function closePreviewActionsMenu() {
+  previewActionsMenuOpen.value = false
+}
+
+function onDocumentPointerDown(event: PointerEvent) {
+  if (!previewActionsMenuRef.value) return
+  if (previewActionsMenuRef.value.contains(event.target as Node)) return
+  closePreviewActionsMenu()
+}
+
+function onDocumentKeyDown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    closePreviewActionsMenu()
+  }
+}
+
 onMounted(() => {
   mql = window.matchMedia('(prefers-color-scheme: dark)')
   mqlHandler = () => {
@@ -1201,11 +1254,14 @@ onMounted(() => {
     const selectedId = localStorage.getItem('selectedLatexTemplate')
     if (selectedId) {
       const found = templates.value.find(t => t.id === selectedId)
-      if (found) {
-        selectedLatexTemplate.value = found
-      }
+    if (found) {
+      selectedLatexTemplate.value = found
     }
+  }
   } catch (_) {}
+
+  document.addEventListener('pointerdown', onDocumentPointerDown)
+  document.addEventListener('keydown', onDocumentKeyDown)
 })
 
 onBeforeUnmount(() => {
@@ -1213,6 +1269,8 @@ onBeforeUnmount(() => {
     if (typeof mql.removeEventListener === 'function') mql.removeEventListener('change', mqlHandler)
     else if (typeof (mql as any).removeListener === 'function') (mql as any).removeListener(mqlHandler)
   }
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
+  document.removeEventListener('keydown', onDocumentKeyDown)
 })
 </script>
 
@@ -1260,9 +1318,10 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="container py-6">
-      <div v-if="importStatus || importError" class="mb-4 rounded-md border bg-card p-3 text-sm">
+      <div v-if="importStatus || importError || exportError" class="mb-4 rounded-md border bg-card p-3 text-sm">
         <p v-if="importStatus" class="text-muted-foreground">{{ importStatus }}</p>
         <p v-if="importError" class="text-destructive">{{ importError }}</p>
+        <p v-if="exportError" class="text-destructive">{{ exportError }}</p>
       </div>
       <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
           <!-- Left: Markdown input -->
@@ -1323,8 +1382,49 @@ onBeforeUnmount(() => {
             </button>
             <div class="flex-1" />
             <span class="hidden text-xs text-muted-foreground sm:inline">Drop PDF to import</span>
-            <Button size="sm" variant="secondary" @click="printCurrentMode">Print</Button>
-            <Button size="sm" variant="secondary" @click="copyFormatted">Copy formatted</Button>
+            <div ref="previewActionsMenuRef" class="relative">
+              <Button
+                size="sm"
+                variant="secondary"
+                :aria-expanded="previewActionsMenuOpen"
+                aria-haspopup="menu"
+                @click="togglePreviewActionsMenu"
+              >
+                <span class="text-base leading-none" aria-hidden="true">☰</span>
+                <span class="sr-only">Open preview actions</span>
+              </Button>
+              <div
+                v-if="previewActionsMenuOpen"
+                class="absolute right-0 top-full z-20 mt-2 min-w-44 rounded-md border bg-popover p-1 shadow-md"
+                role="menu"
+                aria-label="Preview actions"
+              >
+                <button
+                  type="button"
+                  class="flex w-full rounded-sm px-3 py-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  role="menuitem"
+                  @click="closePreviewActionsMenu(); printCurrentMode()"
+                >
+                  Print
+                </button>
+                <button
+                  type="button"
+                  class="flex w-full rounded-sm px-3 py-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  role="menuitem"
+                  @click="closePreviewActionsMenu(); downloadCurrentModeDocx()"
+                >
+                  Download .docx
+                </button>
+                <button
+                  type="button"
+                  class="flex w-full rounded-sm px-3 py-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  role="menuitem"
+                  @click="closePreviewActionsMenu(); copyFormatted()"
+                >
+                  Copy formatted
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- LaTeX action bar (only in LaTeX mode) -->
