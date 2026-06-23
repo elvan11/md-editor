@@ -77,8 +77,20 @@ const renderMode = ref<RenderMode>(
   (localStorage.getItem(RENDER_MODE_KEY) as RenderMode) === 'latex' ? 'latex' : 'html'
 )
 
+type PrintOrientation = 'portrait' | 'landscape'
+const PRINT_ORIENTATION_KEY = 'printOrientation'
+const printOrientation = ref<PrintOrientation>(
+  (localStorage.getItem(PRINT_ORIENTATION_KEY) as PrintOrientation) === 'landscape'
+    ? 'landscape'
+    : 'portrait'
+)
+
 watch(renderMode, (mode) => {
   try { localStorage.setItem(RENDER_MODE_KEY, mode) } catch (_) {}
+})
+
+watch(printOrientation, (orientation) => {
+  try { localStorage.setItem(PRINT_ORIENTATION_KEY, orientation) } catch (_) {}
 })
 
 const mdInput = ref<string>(`# Markdown Editor
@@ -850,6 +862,10 @@ async function copyFormatted() {
   }
 }
 
+function getPrintPageRule(margin: string) {
+  return `@page { size: A4 ${printOrientation.value}; margin: ${margin}; }`
+}
+
 // Build template-specific CSS for the LaTeX-styled render
 function getLatexTemplateCss(template: LatexTemplate): string {
   const base = `
@@ -933,14 +949,14 @@ function getLatexTemplateCss(template: LatexTemplate): string {
   const overrides: Record<string, string> = {
     article: `
       h2 { border-bottom: 0.5pt solid #ccc; padding-bottom: 0.15em; }
-      @media print { @page { size: A4; margin: 25mm; } }
+      @media print { ${getPrintPageRule('25mm')} }
     `,
     report: `
       .doc-title { font-size: 2.2em; font-weight: 700; }
       h1 { font-size: 1.6em; border-bottom: 1pt solid #333; padding-bottom: 0.15em; }
       h2 { font-size: 1.35em; border-bottom: 0.5pt solid #aaa; padding-bottom: 0.15em; }
       .page-wrap { max-width: 160mm; }
-      @media print { @page { size: A4; margin: 28mm; } }
+      @media print { ${getPrintPageRule('28mm')} }
     `,
     book: `
       body { font-size: 12pt; }
@@ -948,7 +964,7 @@ function getLatexTemplateCss(template: LatexTemplate): string {
       h1 { font-size: 2em; border-bottom: 1.5pt solid #000; padding-bottom: 0.2em; margin-top: 3em; }
       h2 { font-size: 1.5em; margin-top: 2.5em; }
       .page-wrap { max-width: 155mm; }
-      @media print { @page { size: A4; margin: 25mm 20mm 30mm 30mm; } }
+      @media print { ${getPrintPageRule('25mm 20mm 30mm 30mm')} }
     `,
   }
   return base + (overrides[template.id] ?? '')
@@ -1121,7 +1137,7 @@ function getHtmlRenderedDocument(html: string, title: string): string {
   <title>${safeTitle}</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    @page { size: A4; margin: 20mm; }
+    ${getPrintPageRule('20mm')}
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       font-size: 11pt;
@@ -1380,6 +1396,26 @@ onBeforeUnmount(() => {
               <span>{{ selectedLatexTemplate.name }}</span>
               <span class="opacity-60">▾</span>
             </button>
+            <div class="inline-flex rounded-md border bg-background p-0.5" aria-label="Print orientation">
+              <button
+                type="button"
+                class="px-2.5 py-1 text-xs rounded-md transition-colors"
+                :class="printOrientation === 'portrait'
+                  ? 'bg-secondary text-secondary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+                :aria-pressed="printOrientation === 'portrait'"
+                @click="printOrientation = 'portrait'"
+              >Portrait</button>
+              <button
+                type="button"
+                class="px-2.5 py-1 text-xs rounded-md transition-colors"
+                :class="printOrientation === 'landscape'
+                  ? 'bg-secondary text-secondary-foreground'
+                  : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'"
+                :aria-pressed="printOrientation === 'landscape'"
+                @click="printOrientation = 'landscape'"
+              >Landscape</button>
+            </div>
             <div class="flex-1" />
             <span class="hidden text-xs text-muted-foreground sm:inline">Drop PDF to import</span>
             <div ref="previewActionsMenuRef" class="relative">
