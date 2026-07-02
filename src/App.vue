@@ -179,6 +179,11 @@ const exportError = ref('')
 const previewActionsMenuOpen = ref(false)
 const dragDepth = ref(0)
 const isDraggingPdf = computed(() => dragDepth.value > 0)
+const deployedAtLabel = new Intl.DateTimeFormat(undefined, {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+  timeZone: 'UTC',
+}).format(new Date(__APP_DEPLOYED_AT__)) + ' UTC'
 
 // Mermaid helpers — always use the light theme so diagrams are legible on any background
 // and print cleanly regardless of the app's dark/light mode.
@@ -1553,6 +1558,13 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </main>
+
+    <footer class="border-t bg-card/30">
+      <div class="container py-3 text-center text-xs text-muted-foreground">
+        Deployed {{ deployedAtLabel }}
+      </div>
+    </footer>
+
     <div
       v-if="isDraggingPdf || isImportingPdf"
       class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-background/70 backdrop-blur-sm"
