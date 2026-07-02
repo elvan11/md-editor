@@ -143,6 +143,30 @@
     margin-top: 0 !important;
   }
 
+  .print-content .heading-keep-with-next {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .print-content .heading-keep-with-next > :first-child {
+    break-after: avoid !important;
+    page-break-after: avoid !important;
+  }
+
+  .print-content table {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+
+  .print-content thead {
+    display: table-header-group !important;
+  }
+
+  .print-content tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
   .print-content hr {
     display: block !important;
     width: 100% !important;

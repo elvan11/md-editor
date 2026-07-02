@@ -114,9 +114,60 @@ Live preview on the right. Try editing this text.
 
 [Vue](https://vuejs.org/) • [Tailwind](https://tailwindcss.com/)`)
 
+const KEEP_WITH_HEADING_SELECTOR = 'pre.mermaid'
+const HEADING_SELECTOR = 'h1, h2, h3, h4, h5, h6'
+const HIGH_LEVEL_HEADING_SELECTOR = 'h1, h2'
+const SECTION_START_SELECTOR = 'h3, h4, h5, h6, p, ul, ol, blockquote'
+const MAX_KEEP_WITH_NEXT_TEXT_LENGTH = 500
+
+function isSmallSectionStart(element: Element) {
+  return element.matches(SECTION_START_SELECTOR)
+    && (element.textContent || '').trim().length <= MAX_KEEP_WITH_NEXT_TEXT_LENGTH
+}
+
+function getElementsToKeepWithHeading(heading: HTMLElement) {
+  const nextElement = heading.nextElementSibling
+  if (!nextElement) return []
+
+  if (nextElement.matches(KEEP_WITH_HEADING_SELECTOR)) {
+    return [nextElement]
+  }
+
+  if (!heading.matches(HIGH_LEVEL_HEADING_SELECTOR) || !isSmallSectionStart(nextElement)) {
+    return []
+  }
+
+  const elements = [nextElement]
+  const followingElement = nextElement.nextElementSibling
+  if (nextElement.matches(HEADING_SELECTOR) && followingElement && isSmallSectionStart(followingElement)) {
+    elements.push(followingElement)
+  }
+
+  return elements
+}
+
+function keepHeadingsWithFollowingBlocks(html: string): string {
+  const template = document.createElement('template')
+  template.innerHTML = html
+
+  Array.from(template.content.querySelectorAll<HTMLElement>(HEADING_SELECTOR)).forEach((heading) => {
+    const elementsToKeep = getElementsToKeepWithHeading(heading)
+    if (elementsToKeep.length === 0) return
+    if (heading.parentElement?.classList.contains('heading-keep-with-next')) return
+
+    const group = document.createElement('div')
+    group.className = 'heading-keep-with-next'
+    heading.before(group)
+    group.append(heading, ...elementsToKeep)
+  })
+
+  return template.innerHTML
+}
+
 const renderedHtml = computed(() => {
   const raw = md.render(mdInput.value)
-  return DOMPurify.sanitize(raw, { ADD_ATTR: ['data-source'] })
+  const sanitized = DOMPurify.sanitize(raw, { ADD_ATTR: ['data-source'] })
+  return keepHeadingsWithFollowingBlocks(sanitized)
 })
 
 const previewRef = ref<HTMLDivElement | null>(null)
@@ -930,7 +981,9 @@ function getLatexTemplateCss(template: LatexTemplate): string {
     }
     hr { border: none; border-top: 1px solid #bbb; margin: 1.5em 0; }
     a { color: #000066; }
-    table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+    table { border-collapse: collapse; width: 100%; margin: 1em 0; break-inside: auto; page-break-inside: auto; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
     th { border-bottom: 2px solid #000; padding: 0.3em 0.6em; text-align: left; font-weight: bold; }
     td { border-bottom: 1px solid #ccc; padding: 0.3em 0.6em; }
     strong { font-weight: bold; }
@@ -939,11 +992,14 @@ function getLatexTemplateCss(template: LatexTemplate): string {
     img { max-width: 100%; }
     pre.mermaid { background: none !important; border: none !important; padding: 0 !important; margin: 1em 0; }
     pre.mermaid svg { max-width: 100%; height: auto; display: block; }
+    .heading-keep-with-next { break-inside: avoid; page-break-inside: avoid; }
+    .heading-keep-with-next > :first-child { break-after: avoid; page-break-after: avoid; }
     @media print {
       body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       pre { page-break-inside: avoid; }
       pre.mermaid { background: none !important; border: none !important; }
       h1, h2, h3, h4 { page-break-after: avoid; }
+      .heading-keep-with-next { break-inside: avoid; page-break-inside: avoid; }
     }
   `
   const overrides: Record<string, string> = {
@@ -1160,13 +1216,17 @@ function getHtmlRenderedDocument(html: string, title: string): string {
     pre code { background: none; padding: 0; }
     pre.mermaid { background: none; border: none; padding: 0.5em 0; text-align: center; }
     pre.mermaid svg { max-width: 100%; height: auto; }
+    .heading-keep-with-next { break-inside: avoid; page-break-inside: avoid; }
+    .heading-keep-with-next > :first-child { break-after: avoid; page-break-after: avoid; }
     hr { border: none; border-top: 1px solid #ccc; margin: 1em 0; }
     a { color: #0066cc; }
-    table { border-collapse: collapse; width: 100%; margin: 0.7em 0; }
+    table { border-collapse: collapse; width: 100%; margin: 0.7em 0; break-inside: auto; page-break-inside: auto; }
+    thead { display: table-header-group; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
     th { border-bottom: 2px solid #999; padding: 0.3em 0.6em; text-align: left; font-weight: 600; }
     td { border-bottom: 1px solid #ddd; padding: 0.3em 0.6em; }
     h1, h2, h3 { page-break-after: avoid; }
-    pre, blockquote, table { page-break-inside: avoid; }
+    pre, blockquote { page-break-inside: avoid; }
   </style>
 </head>
 <body>${html}</body>
