@@ -13,6 +13,9 @@ import { gfm } from 'turndown-plugin-gfm'
 import { DEFAULT_LATEX_TEMPLATES, getDefaultTemplate, formatLatexTemplate, type LatexTemplate } from '@/lib/latex-templates'
 import { markdownToLatex } from '@/lib/markdown-to-latex'
 import { downloadDocxDocument } from '@/lib/docx-export'
+import { getAlignedScrollTop } from '@/lib/pane-sync'
+import { openFullPagePreview } from '@/lib/full-page-preview'
+import { getScreenPreviewLayoutCss } from '@/lib/screen-preview-layout'
 import mermaid from 'mermaid'
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024
@@ -170,6 +173,7 @@ const renderedHtml = computed(() => {
   return keepHeadingsWithFollowingBlocks(sanitized)
 })
 
+const markdownInputRef = ref<HTMLTextAreaElement | null>(null)
 const previewRef = ref<HTMLDivElement | null>(null)
 const previewActionsMenuRef = ref<HTMLDivElement | null>(null)
 const isImportingPdf = ref(false)
@@ -184,6 +188,50 @@ const deployedAtLabel = new Intl.DateTimeFormat(undefined, {
   timeStyle: 'short',
   timeZone: 'UTC',
 }).format(new Date(__APP_DEPLOYED_AT__)) + ' UTC'
+
+let previewResizeObserver: ResizeObserver | null = null
+
+function syncMarkdownHeight() {
+  const textarea = markdownInputRef.value
+  const preview = previewRef.value
+  if (!textarea || !preview) return
+
+  textarea.style.height = `${preview.getBoundingClientRect().height}px`
+}
+
+function getPageTop(element: HTMLElement): number {
+  return element.getBoundingClientRect().top + window.scrollY
+}
+
+function alignPaneToClick(event: MouseEvent, source: 'markdown' | 'preview') {
+  const textarea = markdownInputRef.value
+  const preview = previewRef.value
+  if (!textarea || !preview) return
+
+  const sourceElement = source === 'markdown' ? textarea : preview
+  const targetElement = source === 'markdown' ? preview : textarea
+  const sourceRect = sourceElement.getBoundingClientRect()
+  const localClickOffset = event.clientY - sourceRect.top
+  const sourceOffset = Math.max(0, Math.min(sourceElement.clientHeight, localClickOffset))
+    + (source === 'markdown' ? textarea.scrollTop : 0)
+  const sourceHeight = source === 'markdown' ? textarea.scrollHeight : preview.scrollHeight
+  const targetHeight = source === 'markdown' ? preview.scrollHeight : textarea.scrollHeight
+  const maxScrollTop = Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
+  const targetScrollTop = getAlignedScrollTop({
+    sourceOffset,
+    sourceHeight,
+    targetTop: getPageTop(targetElement),
+    targetHeight,
+    viewportOffset: event.clientY,
+    maxScrollTop,
+  })
+
+  window.scrollTo({ top: targetScrollTop, behavior: 'smooth' })
+}
+
+function onWindowResize() {
+  syncMarkdownHeight()
+}
 
 // Mermaid helpers — always use the light theme so diagrams are legible on any background
 // and print cleanly regardless of the app's dark/light mode.
@@ -219,8 +267,13 @@ async function reinitAndRerunMermaid() {
   await runMermaid()
 }
 
-// Re-run mermaid after every markdown render update
-watch(renderedHtml, () => { nextTick().then(() => runMermaid()) })
+// Re-run mermaid after every markdown render update, then match the editor height.
+watch(renderedHtml, () => {
+  nextTick().then(async () => {
+    await runMermaid()
+    syncMarkdownHeight()
+  })
+})
 
 const td = new TurndownService({
   headingStyle: 'atx',
@@ -999,6 +1052,7 @@ function getLatexTemplateCss(template: LatexTemplate): string {
     pre.mermaid svg { max-width: 100%; height: auto; display: block; }
     .heading-keep-with-next { break-inside: avoid; page-break-inside: avoid; }
     .heading-keep-with-next > :first-child { break-after: avoid; page-break-after: avoid; }
+    ${getScreenPreviewLayoutCss()}
     @media print {
       body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       pre { page-break-inside: avoid; }
@@ -1232,9 +1286,10 @@ function getHtmlRenderedDocument(html: string, title: string): string {
     td { border-bottom: 1px solid #ddd; padding: 0.3em 0.6em; }
     h1, h2, h3 { page-break-after: avoid; }
     pre, blockquote { page-break-inside: avoid; }
+    ${getScreenPreviewLayoutCss()}
   </style>
 </head>
-<body>${html}</body>
+<body class="html-preview">${html}</body>
 </html>`
 }
 
@@ -1251,6 +1306,11 @@ function printCurrentMode() {
   setTimeout(() => {
     if (!win.closed) { win.print(); win.close() }
   }, 800)
+}
+
+function previewCurrentMode() {
+  const { documentHtml } = getCurrentRenderedDocument()
+  openFullPagePreview(documentHtml)
 }
 
 // Theme switching (auto | light | dark)
@@ -1321,7 +1381,16 @@ onMounted(() => {
   applyTheme(themeMode.value)
   // Initialize mermaid and render any diagrams in the initial content
   initMermaid()
-  nextTick().then(() => runMermaid())
+  nextTick().then(async () => {
+    await runMermaid()
+    syncMarkdownHeight()
+  })
+
+  if (previewRef.value) {
+    previewResizeObserver = new ResizeObserver(syncMarkdownHeight)
+    previewResizeObserver.observe(previewRef.value)
+  }
+  window.addEventListener('resize', onWindowResize)
   
   // Load custom LaTeX templates from localStorage
   try {
@@ -1352,6 +1421,9 @@ onBeforeUnmount(() => {
   }
   document.removeEventListener('pointerdown', onDocumentPointerDown)
   document.removeEventListener('keydown', onDocumentKeyDown)
+  previewResizeObserver?.disconnect()
+  previewResizeObserver = null
+  window.removeEventListener('resize', onWindowResize)
 })
 </script>
 
@@ -1404,9 +1476,9 @@ onBeforeUnmount(() => {
         <p v-if="importError" class="text-destructive">{{ importError }}</p>
         <p v-if="exportError" class="text-destructive">{{ exportError }}</p>
       </div>
-      <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
+      <div class="grid grid-cols-1 items-stretch gap-6 md:grid-cols-2">
           <!-- Left: Markdown input -->
-          <section class="flex flex-col rounded-lg border bg-card shadow-sm">
+          <section class="flex h-full flex-col rounded-lg border bg-card shadow-sm">
             <div class="flex items-center justify-between border-b p-3 md:p-4">
               <h2 class="text-sm font-medium tracking-tight">Markdown</h2>
               <div class="flex items-center gap-2">
@@ -1416,21 +1488,23 @@ onBeforeUnmount(() => {
             </div>
             <div class="p-3 md:p-4">
               <textarea
+                ref="markdownInputRef"
                 v-model="mdInput"
-                class="min-h-[65vh] w-full resize-vertical rounded-md border bg-background p-3 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                class="w-full resize-none rounded-md border bg-background p-3 font-mono text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 spellcheck="false"
                 placeholder="Type your Markdown here..."
+                @click="alignPaneToClick($event, 'markdown')"
               />
             </div>
           </section>
 
           <!-- Right: Preview -->
-          <section class="flex flex-col rounded-lg border bg-card shadow-sm">
+          <section class="flex h-full flex-col rounded-lg border bg-card shadow-sm">
           <!-- Header row: title, mode selector, action buttons -->
           <div class="flex flex-wrap items-center gap-2 border-b p-3 md:p-4">
-            <h2 class="text-sm font-medium tracking-tight">Preview</h2>
+            <h2 class="text-sm font-medium tracking-tight">Rendered content</h2>
             <!-- Mode toggle -->
-            <div class="inline-flex rounded-md border bg-background p-0.5">
+            <div class="inline-flex rounded-md border bg-background p-0.5" aria-label="Rendering mode">
               <button
                 type="button"
                 class="px-2.5 py-1 text-xs rounded-md transition-colors"
@@ -1504,6 +1578,14 @@ onBeforeUnmount(() => {
                   type="button"
                   class="flex w-full rounded-sm px-3 py-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
                   role="menuitem"
+                  @click="closePreviewActionsMenu(); previewCurrentMode()"
+                >
+                  Full-page preview
+                </button>
+                <button
+                  type="button"
+                  class="flex w-full rounded-sm px-3 py-2 text-left text-sm text-popover-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  role="menuitem"
                   @click="closePreviewActionsMenu(); printCurrentMode()"
                 >
                   Print
@@ -1553,6 +1635,7 @@ onBeforeUnmount(() => {
               @paste.prevent="onPastePreview"
               @beforeinput="onBeforeInput"
               @drop.prevent
+              @click="alignPaneToClick($event, 'preview')"
             />
           </div>
         </section>
